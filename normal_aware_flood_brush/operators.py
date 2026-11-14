@@ -206,6 +206,7 @@ class VIEW3D_OT_normal_flood_brush(bpy.types.Operator):
         self._is_painting = False
         self._is_navigating = False
         self._is_resizing = False
+        self._suppress_paint_until_release = False
         self._resize_locked_toggle = False
         self._resize_anchor_x = event.mouse_x
         self._resize_start_radius = props.fill_radius
@@ -354,14 +355,17 @@ class VIEW3D_OT_normal_flood_brush(bpy.types.Operator):
         self._redraw_viewport(context)
 
     def _handle_color_pick(self, context, event) -> bool:
-        """Pick/sample color on Right-Click or S from 3D surface, UI palette, or cycle palette."""
+        """Pick/sample color on Right-Click or E from 3D surface, or cycle active palette in empty space."""
+        if self._is_over_ui(event.mouse_x, event.mouse_y):
+            return False
+
         ps = get_paint_settings(context)
         pal = getattr(ps, "palette", None) if ps else None
 
-        # 1. Surface sampling: if over 3D mesh face.
+        # 1. Exact 3D surface sampling at raycast hit point (barycentric UV pixel or vertex).
         hit_pos, hit_normal, face_idx = self._raycast_mouse(event.mouse_x, event.mouse_y)
-        if face_idx is not None:
-            col = self._cache.get_face_color_at(face_idx, self._target_mode)
+        if face_idx is not None and hit_pos is not None:
+            col = self._cache.get_color_at_hit(face_idx, hit_pos, self._target_mode)
             if col is not None:
                 rgb = (float(col[0]), float(col[1]), float(col[2]))
                 set_effective_fill_rgb(context, rgb)
@@ -380,41 +384,12 @@ class VIEW3D_OT_normal_flood_brush(bpy.types.Operator):
                 self._redraw_viewport(context)
                 return True
 
-        # 2. UI / screen pixel sampling (e.g. palette in N-panel sidebar, color picker).
-        sampled_screen = self._sample_screen_pixel_linear(event.mouse_x, event.mouse_y)
-        if sampled_screen is not None:
-            lin_rgb = sampled_screen[:3]
-            if pal and len(pal.colors) > 0:
-                best_pc = min(pal.colors, key=lambda pc: sum((a - b) ** 2 for a, b in zip(pc.color, lin_rgb)))
-                dist = sum((a - b) ** 2 for a, b in zip(best_pc.color, lin_rgb))
-                if dist < 0.08 or self._is_over_ui(event.mouse_x, event.mouse_y):
-                    exact_rgb = (float(best_pc.color[0]), float(best_pc.color[1]), float(best_pc.color[2]))
-                    set_effective_fill_rgb(context, exact_rgb)
-                    pal.colors.active = best_pc
-                    self._sync_overlay_props(context)
-                    self._overlay.set_toast(
-                        f"Picked palette: ({exact_rgb[0]:.2f}, {exact_rgb[1]:.2f}, {exact_rgb[2]:.2f})",
-                        duration=1.5,
-                    )
-                    self._redraw_viewport(context)
-                    return True
-
-            if self._is_over_ui(event.mouse_x, event.mouse_y):
-                set_effective_fill_rgb(context, lin_rgb)
-                self._sync_overlay_props(context)
-                self._overlay.set_toast(
-                    f"Sampled UI color: ({lin_rgb[0]:.2f}, {lin_rgb[1]:.2f}, {lin_rgb[2]:.2f})",
-                    duration=1.5,
-                )
-                self._redraw_viewport(context)
-                return True
-
-        # 3. Empty 3D space: cycle to next color in active palette.
+        # 2. Empty 3D space: cycle to next color in active palette.
         if pal and len(pal.colors) > 0:
             self._cycle_palette_color(context)
             return True
 
-        self._overlay.set_toast("E (or Alt+S): Sample surface/palette color", duration=1.4)
+        self._overlay.set_toast("E: Sample surface color", duration=1.4)
         self._redraw_viewport(context)
         return False
 
@@ -711,6 +686,7 @@ class VIEW3D_OT_normal_flood_brush(bpy.types.Operator):
                 preserve_existing=(props.preserve_existing or props.invert_flood),
                 stroke_tex_mask=self._stroke_tex_mask,
                 commit=commit_tex,
+                smooth_boundary=props.smooth_tool,
             )
             if pix_idx.size > 0:
                 stroke["pix_chunks"].append(pix_idx)
@@ -723,8 +699,11 @@ class VIEW3D_OT_normal_flood_brush(bpy.types.Operator):
                     self._tex_push_pending = True
 
         if target_mode in {'FACE_SET', 'BOTH'} and self._cache.face_set_buf is not None:
-            stroke["old_fs_chunks"].append(self._cache.face_set_buf[new_faces].copy())
-            self._cache.apply_face_set_indices(new_faces, stroke["fs_id"])
+            apply_faces = new_faces
+            if props.smooth_tool and self._last_hit_pos is not None:
+                apply_faces = smooth_flood_boundary_faces(self._cache, new_faces, self._last_hit_pos, props.fill_radius)
+            stroke["old_fs_chunks"].append(self._cache.face_set_buf[apply_faces].copy())
+            self._cache.apply_face_set_indices(apply_faces, stroke["fs_id"])
             mesh_dirty = True
 
         if target_mode in {'COLOR', 'BOTH'} and self._cache.color_buf is not None:
@@ -735,13 +714,46 @@ class VIEW3D_OT_normal_flood_brush(bpy.types.Operator):
                 stroke["elem_chunks"].append(new_elems)
                 stroke["old_color_chunks"].append(self._cache.color_buf[new_elems].copy())
                 fill_rgba = get_effective_fill_rgba(context)
-                self._cache.apply_color_indices(new_elems, fill_rgba)
+
+                if props.smooth_tool and self._cache.color_domain == 'POINT':
+                    verts, ratios = self._cache.faces_to_vert_incident_coverage(new_faces)
+                    in_new = np.isin(verts, new_elems)
+                    v_apply = verts[in_new]
+                    r_apply = ratios[in_new]
+                    s_ratios = r_apply * r_apply * (3.0 - 2.0 * r_apply)
+                    old_c = self._cache.color_buf[v_apply]
+                    target_c = np.asarray(fill_rgba, dtype=np.float32)
+                    blended = old_c * (1.0 - s_ratios[:, None]) + target_c[None, :] * s_ratios[:, None]
+                    self._cache.color_buf[v_apply] = blended
+                    if self._cache.srgb_buf is not None:
+                        srgb = np.empty_like(blended)
+                        srgb[:, :3] = linear_to_srgb(blended[:, :3])
+                        srgb[:, 3] = np.clip(blended[:, 3], 0.0, 1.0)
+                        self._cache.srgb_buf[v_apply] = srgb
+                    self._cache.push_color_buffer()
+                else:
+                    self._cache.apply_color_indices(new_elems, fill_rgba)
+
+                if props.smooth_tool and self._last_hit_pos is not None:
+                    smooth_local_vertex_paint(
+                        cache=self._cache,
+                        hit_pos=self._last_hit_pos,
+                        radius=props.fill_radius,
+                        iterations=1,
+                        strength=0.5,
+                    )
                 mesh_dirty = True
 
         if target_mode == 'WEIGHT' and self._active_vertex_group is not None:
-            verts = self._cache.faces_to_vert_indices(new_faces)
+            vg = self._active_vertex_group
+            weight_val = get_effective_weight_value(context)
+            if props.smooth_tool:
+                verts, ratios = self._cache.faces_to_vert_incident_coverage(new_faces)
+            else:
+                verts = self._cache.faces_to_vert_indices(new_faces)
+                ratios = None
+
             if verts.size > 0:
-                vg = self._active_vertex_group
                 old_weights = {}
                 for v in verts:
                     vi = int(v)
@@ -749,8 +761,17 @@ class VIEW3D_OT_normal_flood_brush(bpy.types.Operator):
                         old_weights[vi] = vg.weight(vi)
                     except RuntimeError:
                         old_weights[vi] = None
-                weight_val = get_effective_weight_value(context)
-                vg.add(verts.tolist(), weight_val, 'REPLACE')
+
+                if ratios is not None:
+                    s_ratios = ratios * ratios * (3.0 - 2.0 * ratios)
+                    for vi, s in zip(verts.tolist(), s_ratios.tolist()):
+                        old_w = old_weights.get(vi)
+                        old_val = 0.0 if old_w is None else float(old_w)
+                        w = old_val * (1.0 - s) + weight_val * s
+                        vg.add([vi], float(w), 'REPLACE')
+                else:
+                    vg.add(verts.tolist(), weight_val, 'REPLACE')
+
                 stroke["weight_chunks"].append((vg, old_weights, verts.copy()))
                 mesh_dirty = True
 
@@ -867,6 +888,7 @@ class VIEW3D_OT_normal_flood_brush(bpy.types.Operator):
     def _enter_resize(self, context, event, locked_toggle: bool = False):
         props = context.scene.normal_flood_brush
         self._is_resizing = True
+        self._suppress_paint_until_release = False
         self._resize_locked_toggle = locked_toggle
         self._resize_anchor_x = event.mouse_x
         self._resize_start_radius = props.fill_radius
@@ -1114,18 +1136,18 @@ class VIEW3D_OT_normal_flood_brush(bpy.types.Operator):
             if event.value == 'PRESS':
                 if self._is_resizing:
                     self._exit_resize(context)
+                    self._suppress_paint_until_release = True
                     self._refresh_at_last_hit(context)
                     self._redraw_viewport(context)
+                    return {'RUNNING_MODAL'}
+                if self._suppress_paint_until_release:
                     return {'RUNNING_MODAL'}
                 if self._is_over_ui(event.mouse_x, event.mouse_y):
                     if self._is_painting:
                         self._is_painting = False
                         self._end_stroke()
-                    picked = self._handle_color_pick(context, event)
                     self._sync_overlay_props(context)
                     self._redraw_viewport(context)
-                    if picked:
-                        return {'RUNNING_MODAL'}
                     return {'PASS_THROUGH'}
                 hit_pos, hit_normal, face_idx = self._raycast_mouse(event.mouse_x, event.mouse_y)
                 self._is_painting = True
@@ -1141,6 +1163,11 @@ class VIEW3D_OT_normal_flood_brush(bpy.types.Operator):
                 return {'RUNNING_MODAL'}
 
             if event.value == 'RELEASE':
+                if self._suppress_paint_until_release:
+                    self._suppress_paint_until_release = False
+                    self._refresh_at_last_hit(context)
+                    self._redraw_viewport(context)
+                    return {'RUNNING_MODAL'}
                 if self._is_painting:
                     self._is_painting = False
                     self._end_stroke()
@@ -1150,7 +1177,7 @@ class VIEW3D_OT_normal_flood_brush(bpy.types.Operator):
                 if self._is_over_ui(event.mouse_x, event.mouse_y):
                     self._sync_overlay_props(context)
                     self._redraw_viewport(context)
-                    return {'RUNNING_MODAL'}
+                    return {'PASS_THROUGH'}
 
         # Mouse movement: resize radius dynamically OR raycast & preview/paint continuously.
         if event.type == 'MOUSEMOVE':
@@ -1181,11 +1208,12 @@ class VIEW3D_OT_normal_flood_brush(bpy.types.Operator):
                     or self._target_mode != 'TEXTURE'
                     or ((time.monotonic() - self._last_tex_push_time) >= 0.033)
                 )
+                paint_flag = self._is_painting and not self._suppress_paint_until_release
                 self._update_from_mouse(
                     context,
                     event.mouse_x,
                     event.mouse_y,
-                    paint=self._is_painting,
+                    paint=paint_flag,
                     commit_tex=commit_tex,
                 )
                 self._redraw_viewport(context)

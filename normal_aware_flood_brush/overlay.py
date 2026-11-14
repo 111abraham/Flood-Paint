@@ -179,10 +179,12 @@ def draw_callback_view(overlay: FloodOverlayState, context):
                     edge_shader = _make_polyline_shader()
                     edge_shader.bind()
                     edge_shader.uniform_float("viewportSize", vp_size)
-                    edge_shader.uniform_float("lineWidth", 2.2)
-                    outline_col = (1.0, 0.35, 0.35, 0.95) if overlay.protected_hit else (1.0, 0.95, 0.35, 0.95)
+                    edge_shader.uniform_float("lineWidth", 2.4)
+                    outline_col = (1.0, 0.35, 0.35, 0.98) if overlay.protected_hit else (1.0, 0.95, 0.35, 0.98)
                     edge_shader.uniform_float("color", outline_col)
+                    gpu.state.depth_test_set('NONE')
                     overlay.edge_batch.draw(edge_shader)
+                    gpu.state.depth_test_set('LESS_EQUAL')
 
         if overlay.ring_batch is not None:
             with gpu.matrix.push_pop():

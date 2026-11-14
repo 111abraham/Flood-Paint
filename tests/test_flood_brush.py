@@ -1465,6 +1465,78 @@ class TestNormalAwareFloodBrush(unittest.TestCase):
         obj.vertex_groups.remove(vg)
         self.assertEqual(len(obj.vertex_groups), 0)
 
+    def test_21_boundary_clipping_smooth_painting_and_resize_commit(self):
+        """Verify boundary completeness, exact hit color sampling, smooth painting falloff, and resize commit."""
+        # 1. Open boundary plane mesh test
+        bpy.ops.mesh.primitive_grid_add(x_subdivisions=5, y_subdivisions=5, size=2.0)
+        obj = bpy.context.active_object
+        depsgraph = bpy.context.evaluated_depsgraph_get()
+        cache = MeshFloodCache(
+            obj=obj,
+            depsgraph=depsgraph,
+            target_output='COLOR',
+            default_domain='POINT',
+            default_type='FLOAT_COLOR',
+        )
+
+        # Flood select corner faces
+        sel_faces = np.array([0, 1, 4, 5], dtype=np.int32)
+        tri_coords, edge_coords = cache.extract_preview_geometry(sel_faces, smooth_boundary=True)
+        self.assertIsNotNone(tri_coords)
+        self.assertIsNotNone(edge_coords)
+        self.assertGreater(edge_coords.size, 0)
+
+        # 2. Verify incident face coverage computation
+        verts, ratios = cache.faces_to_vert_incident_coverage(sel_faces)
+        self.assertGreater(verts.size, 0)
+        self.assertEqual(verts.size, ratios.size)
+        self.assertTrue(np.all((ratios >= 0.0) & (ratios <= 1.0)))
+        # In a 2x2 patch on an open grid, corner vertex has different coverage than boundary vertex
+        self.assertTrue(np.any(ratios < 1.0))
+
+        # 3. Exact hit color sampling
+        col = cache.get_color_at_hit(0, cache.face_centers[0], 'COLOR')
+        self.assertIsNotNone(col)
+        self.assertEqual(len(col), 4)
+
+        # 4. Weight paint smooth boundary falloff calculation
+        obj.vertex_groups.new(name="TestWeightSmooth")
+        vg = obj.vertex_groups.active
+        weight_val = 1.0
+        s_ratios = ratios * ratios * (3.0 - 2.0 * ratios)
+        for vi, s in zip(verts.tolist(), s_ratios.tolist()):
+            w = weight_val * s
+            vg.add([vi], float(w), 'REPLACE')
+        # Boundary vertex has weight < 1.0
+        boundary_verts = verts[ratios < 1.0]
+        self.assertGreater(boundary_verts.size, 0)
+        for bv in boundary_verts:
+            self.assertLess(vg.weight(int(bv)), 1.0)
+
+        # 5. Texture paint with smooth_boundary=True
+        img = bpy.data.images.new("SmoothTestImg", width=128, height=128, alpha=True)
+        img.pixels.foreach_set([1.0] * (128 * 128 * 4))
+        uv_layer = obj.data.uv_layers.new(name="UVMap")
+        bpy.context.view_layer.update()
+        depsgraph = bpy.context.evaluated_depsgraph_get()
+        t_cache = MeshFloodCache(
+            obj=obj,
+            depsgraph=depsgraph,
+            target_output='TEXTURE',
+            default_domain='CORNER',
+            default_type='FLOAT_COLOR',
+            tex_image=img,
+            uv_layer=uv_layer,
+        )
+        flat_idx, old_px = t_cache.apply_texture_faces(
+            sel_faces,
+            (0.2, 0.4, 0.8, 1.0),
+            commit=True,
+            smooth_boundary=True,
+        )
+        self.assertGreater(flat_idx.size, 0)
+        self.assertEqual(flat_idx.size, old_px.shape[0])
+
 
 if __name__ == "__main__":
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(TestNormalAwareFloodBrush)

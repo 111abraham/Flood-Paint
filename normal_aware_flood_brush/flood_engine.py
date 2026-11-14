@@ -157,13 +157,14 @@ def _run_wavefront_flood(
         else:
             ratio = angles_ok / angle_rad
             if hard_stop:
-                mult = 1.0 + 4.0 * (ratio * ratio)
+                over = np.maximum(ratio - 1.0, 0.0)
+                mult = np.where(ratio <= 1.0, 1.0, 1.0 + penalty_scale * (over * over + over))
             else:
-                r2_ratio = ratio * ratio
+                over = np.maximum(ratio - 1.0, 0.0)
                 mult = np.where(
                     ratio <= 1.0,
-                    1.0 + 4.0 * crease_resistance * r2_ratio,
-                    1.0 + 4.0 * crease_resistance + penalty_scale * r2_ratio,
+                    1.0 + 0.5 * crease_resistance * (ratio * ratio),
+                    1.0 + 0.5 * crease_resistance + penalty_scale * (over * over + over),
                 )
             step_costs = np.maximum(dists_ok, min_step) * mult
 

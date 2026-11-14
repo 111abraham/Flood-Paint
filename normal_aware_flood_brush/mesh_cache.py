@@ -232,6 +232,10 @@ class MeshFloodCache:
         mesh.vertices.foreach_get("co", vert_coords_flat)
         self.vert_coords = vert_coords_flat.reshape((self.num_verts, 3))
 
+        vert_normals_flat = np.empty(self.num_verts * 3, dtype=np.float32)
+        mesh.vertices.foreach_get("normal", vert_normals_flat)
+        self.vert_normals = vert_normals_flat.reshape((self.num_verts, 3))
+
         self.loop_verts = np.empty(self.num_loops, dtype=np.int32)
         mesh.loops.foreach_get("vertex_index", self.loop_verts)
 
@@ -248,6 +252,7 @@ class MeshFloodCache:
         )
 
         if geom_hit:
+            self.vert_normals = cached.get("vert_normals", self.vert_normals)
             self.face_centers = cached["face_centers"]
             self.face_normals = cached["face_normals"]
             self.poly_starts = cached["poly_starts"]
@@ -338,6 +343,7 @@ class MeshFloodCache:
                     "dims": (self.num_verts, self.num_faces, self.num_loops, self.num_edges),
                     "matrix_key": matrix_key,
                     "vert_coords": self.vert_coords,
+                    "vert_normals": self.vert_normals,
                     "loop_verts": self.loop_verts,
                     "face_centers": self.face_centers,
                     "face_normals": self.face_normals,
@@ -800,6 +806,30 @@ class MeshFloodCache:
             loop_idx = np.arange(total_loops, dtype=np.int32) + group_offsets
         return np.unique(self.loop_verts[loop_idx])
 
+    def faces_to_vert_incident_coverage(self, face_indices: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Return unique vertex indices in face_indices and their incident face selection ratio in [0, 1]."""
+        if face_indices.size == 0:
+            return np.empty(0, dtype=np.int32), np.empty(0, dtype=np.float32)
+
+        if self.all_tris:
+            starts = face_indices * 3
+            loop_idx = np.column_stack((starts, starts + 1, starts + 2)).ravel()
+        else:
+            starts = self.poly_starts[face_indices]
+            totals = self.poly_totals[face_indices]
+            total_loops = int(totals.sum())
+            if total_loops == 0:
+                return np.empty(0, dtype=np.int32), np.empty(0, dtype=np.float32)
+            cum = np.cumsum(totals)
+            loop_idx = np.arange(total_loops, dtype=np.int32) + np.repeat(starts - (cum - totals), totals)
+
+        sel_verts = self.loop_verts[loop_idx]
+        sel_counts = np.bincount(sel_verts, minlength=self.num_verts)
+        total_counts = np.bincount(self.loop_verts, minlength=self.num_verts)
+        uniq_verts = np.unique(sel_verts)
+        ratios = sel_counts[uniq_verts].astype(np.float32) / np.maximum(total_counts[uniq_verts].astype(np.float32), 1.0)
+        return uniq_verts, np.clip(ratios, 0.0, 1.0)
+
     def get_face_colors_linear(self) -> np.ndarray | None:
         """Return an (N_F, 4) linear RGBA proxy array per polygon for barrier checks."""
         if self.color_buf is None:
@@ -841,6 +871,90 @@ class MeshFloodCache:
             if self.color_domain == 'CORNER':
                 return self.color_buf[self.poly_starts[face_idx]].copy()
             return self.color_buf[self.poly_first_verts[face_idx]].copy()
+        return None
+
+    def get_color_at_hit(self, face_idx: int, hit_pos: np.ndarray, target_output: str) -> np.ndarray | None:
+        """Sample exact color at the raycast hit position (barycentric UV pixel or vertex color)."""
+        if face_idx < 0 or face_idx >= self.num_faces:
+            return None
+
+        if target_output == 'TEXTURE':
+            if self.tex_buf is None or self.tri_uvs is None:
+                return self.get_face_color_at(face_idx, target_output)
+            if self.all_tris:
+                t_indices = np.array([face_idx], dtype=np.int32)
+            else:
+                t_indices = np.flatnonzero(self.tri_poly_idx == face_idx).astype(np.int32)
+            if t_indices.size == 0:
+                return self.get_face_color_at(face_idx, target_output)
+
+            t_verts = self.tri_verts[t_indices]
+            t_coords = self.vert_coords[t_verts] @ self.rot_scale_3x3.T
+            t_centers = np.mean(t_coords, axis=1)
+            best_k = int(np.argmin(np.sum((t_centers - hit_pos) ** 2, axis=1)))
+            best_ti = t_indices[best_k]
+
+            v0 = t_coords[best_k, 0]
+            v1 = t_coords[best_k, 1]
+            v2 = t_coords[best_k, 2]
+            e0 = v1 - v0
+            e1 = v2 - v0
+            ep = hit_pos - v0
+            d00 = float(np.dot(e0, e0))
+            d01 = float(np.dot(e0, e1))
+            d11 = float(np.dot(e1, e1))
+            dp0 = float(np.dot(ep, e0))
+            dp1 = float(np.dot(ep, e1))
+            denom = d00 * d11 - d01 * d01
+            if abs(denom) > 1e-8:
+                b1 = (d11 * dp0 - d01 * dp1) / denom
+                b2 = (d00 * dp1 - d01 * dp0) / denom
+                b0 = 1.0 - b1 - b2
+                b0 = max(0.0, min(1.0, b0))
+                b1 = max(0.0, min(1.0, b1))
+                b2 = max(0.0, min(1.0, b2))
+                b_sum = b0 + b1 + b2
+                if b_sum > 1e-6:
+                    b0 /= b_sum
+                    b1 /= b_sum
+                    b2 /= b_sum
+            else:
+                b0, b1, b2 = 1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0
+
+            uvs = self.tri_uvs[best_ti]
+            uv = b0 * uvs[0] + b1 * uvs[1] + b2 * uvs[2]
+            px = max(0, min(self.tex_width - 1, int(uv[0] * self.tex_width)))
+            py = max(0, min(self.tex_height - 1, int(uv[1] * self.tex_height)))
+            col = self.tex_buf[py, px].copy()
+            if self.tex_is_srgb:
+                col[:3] = srgb_to_linear(col[:3])
+            return col
+
+        if self.color_buf is not None:
+            if self.color_domain == 'CORNER':
+                if self.all_tris:
+                    t_idx = face_idx
+                    t_loops = t_idx * 3 + np.arange(3, dtype=np.int32)
+                else:
+                    t_matches = np.flatnonzero(self.tri_poly_idx == face_idx)
+                    if t_matches.size > 0:
+                        t_idx = t_matches[0]
+                        t_loops = self.tri_loops[t_idx]
+                    else:
+                        t_loops = np.arange(self.poly_starts[face_idx], self.poly_starts[face_idx] + self.poly_totals[face_idx], dtype=np.int32)
+                loop_v = self.loop_verts[t_loops]
+                loop_coords = self.vert_coords[loop_v] @ self.rot_scale_3x3.T
+                closest_k = int(np.argmin(np.sum((loop_coords - hit_pos) ** 2, axis=1)))
+                return self.color_buf[t_loops[closest_k]].copy()
+            else:
+                if self.all_tris:
+                    poly_v = self.loop_verts[face_idx * 3 : face_idx * 3 + 3]
+                else:
+                    poly_v = self.loop_verts[self.poly_starts[face_idx] : self.poly_starts[face_idx] + self.poly_totals[face_idx]]
+                poly_coords = self.vert_coords[poly_v] @ self.rot_scale_3x3.T
+                closest_k = int(np.argmin(np.sum((poly_coords - hit_pos) ** 2, axis=1)))
+                return self.color_buf[poly_v[closest_k]].copy()
+
         return None
 
     def push_color_buffer(self):
@@ -950,6 +1064,7 @@ class MeshFloodCache:
         preserve_existing: bool = False,
         stroke_tex_mask: np.ndarray | None = None,
         commit: bool = True,
+        smooth_boundary: bool = False,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Rasterize flooded faces onto the active Texture Paint image and return undo delta."""
         if face_indices.size == 0 or self.tex_buf is None or self.tri_uvs is None:
@@ -1021,8 +1136,23 @@ class MeshFloodCache:
         if flat_idx.size == 0:
             return np.empty(0, dtype=np.int32), np.empty((0, 4), dtype=np.float32)
 
+        weights = None
+        if smooth_boundary and crop_h > 2 and crop_w > 2:
+            m = crop_mask.astype(np.float32)
+            cov = (
+                0.25 * m[1:-1, 1:-1]
+                + 0.125 * (m[:-2, 1:-1] + m[2:, 1:-1] + m[1:-1, :-2] + m[1:-1, 2:])
+                + 0.0625 * (m[:-2, :-2] + m[:-2, 2:] + m[2:, :-2] + m[2:, 2:])
+            )
+            w_arr = np.ones((crop_h, crop_w), dtype=np.float32)
+            w_arr[1:-1, 1:-1] = np.clip(cov * 1.5, 0.0, 1.0)
+            weights = w_arr[ry, rx]
+
         if stroke_tex_mask is not None:
-            flat_idx = flat_idx[~stroke_tex_mask[flat_idx]]
+            valid_mask = ~stroke_tex_mask[flat_idx]
+            flat_idx = flat_idx[valid_mask]
+            if weights is not None:
+                weights = weights[valid_mask]
             if flat_idx.size == 0:
                 return np.empty(0, dtype=np.int32), np.empty((0, 4), dtype=np.float32)
             stroke_tex_mask[flat_idx] = True
@@ -1039,15 +1169,15 @@ class MeshFloodCache:
         write_col = write_col.copy() if write_col is write_lin else write_col
         write_col[3] = np.clip(write_col[3], 0.0, 1.0)
 
-        self.tex_buf_flat[flat_idx] = write_col
+        if weights is not None:
+            w_fac = weights[:, None]
+            self.tex_buf_flat[flat_idx] = old_pixels * (1.0 - w_fac) + write_col * w_fac
+        else:
+            self.tex_buf_flat[flat_idx] = write_col
         if self.face_tex_colors is not None:
             lin_upd = write_lin.copy()
             lin_upd[3] = write_col[3]
-            if preserve_existing:
-                # Only update faces whose centroid actually belongs to this flood (non-protected).
-                self.face_tex_colors[face_indices] = lin_upd
-            else:
-                self.face_tex_colors[face_indices] = lin_upd
+            self.face_tex_colors[face_indices] = lin_upd
 
         if commit:
             self.push_texture_buffer()
@@ -1145,17 +1275,24 @@ class MeshFloodCache:
                 tri_coords = self.vert_coords[sel_tris].reshape((-1, 3))
 
         edge_coords = None
-        starts = self.adj_offsets[face_indices]
-        ends = self.adj_offsets[face_indices + 1]
-        counts = ends - starts
-        total = int(counts.sum())
-        if total > 0:
-            cum = np.cumsum(counts)
-            edge_idx = np.arange(total, dtype=np.int32) + np.repeat(starts - (cum - counts), counts)
-            nbs = self.adj_neighbors[edge_idx]
-            boundary_mask = ~in_mask[nbs]
-            if np.any(boundary_mask):
-                b_edges = self.adj_edges[edge_idx[boundary_mask]]
+        if self.all_tris:
+            starts = face_indices * 3
+            loop_idx = np.column_stack((starts, starts + 1, starts + 2)).ravel()
+        else:
+            starts = self.poly_starts[face_indices]
+            totals = self.poly_totals[face_indices]
+            total_loops = int(totals.sum())
+            if total_loops > 0:
+                cum = np.cumsum(totals)
+                loop_idx = np.arange(total_loops, dtype=np.int32) + np.repeat(starts - (cum - totals), totals)
+            else:
+                loop_idx = np.empty(0, dtype=np.int32)
+
+        if loop_idx.size > 0:
+            f_edges = self.loop_edges[loop_idx]
+            edge_counts = np.bincount(f_edges, minlength=self.num_edges)
+            b_edges = np.flatnonzero(edge_counts == 1).astype(np.int32)
+            if b_edges.size > 0:
                 if smooth_boundary:
                     edge_coords = self._smooth_boundary_edges(b_edges)
                 else:
@@ -1187,7 +1324,9 @@ class MeshFloodCache:
         b_verts, inv = np.unique(edges, return_inverse=True)
         n_bv = len(b_verts)
 
-        b_coords = self.vert_coords[b_verts].copy()
+        orig_coords = self.vert_coords[b_verts]
+        b_coords = orig_coords.copy()
+        vn = self.vert_normals[b_verts]
 
         edge_u = inv[:, 0]
         edge_v = inv[:, 1]
@@ -1204,9 +1343,15 @@ class MeshFloodCache:
             avg_nb = sum_pos / valid_deg[:, None]
             b_coords = 0.5 * b_coords + 0.5 * avg_nb
 
+        # Prevent boundary vertices from sinking into the mesh interior:
+        disp = b_coords - orig_coords
+        inward_dot = np.sum(disp * vn, axis=1)
+        b_coords = b_coords - np.minimum(inward_dot, 0.0)[:, None] * vn + vn * 0.0003
+
         p0 = b_coords[edge_u]
         p1 = b_coords[edge_v]
-        pmid = 0.5 * (p0 + p1)
+        edge_vn = 0.5 * (vn[edge_u] + vn[edge_v])
+        pmid = 0.5 * (p0 + p1) + edge_vn * 0.0002
 
         # Subdivide each edge into 2 segments: (p0 -> pmid) and (pmid -> p1)
         # This doubles the resolution and rounds all stair-steps into smooth curves.
