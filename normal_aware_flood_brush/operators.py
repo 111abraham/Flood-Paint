@@ -710,21 +710,27 @@ class VIEW3D_OT_normal_flood_brush(bpy.types.Operator):
             elems = self._cache.faces_to_color_indices(new_faces)
             new_elems = elems[~self._stroke_elem_mask[elems]]
             if new_elems.size > 0:
-                self._stroke_elem_mask[new_elems] = True
-                stroke["elem_chunks"].append(new_elems)
-                stroke["old_color_chunks"].append(self._cache.color_buf[new_elems].copy())
                 fill_rgba = get_effective_fill_rgba(context)
 
                 # Hard brush: 100% solid color, trim isolated single-quad stair bumps (ratios >= 0.35)
-                if props.smooth_tool and self._cache.color_domain == 'POINT':
+                # Supports both CORNER (default) and POINT Color Attribute domains.
+                if props.smooth_tool:
                     verts, ratios = self._cache.faces_to_vert_incident_coverage(new_faces)
-                    in_new = np.isin(verts, new_elems)
-                    v_apply = verts[in_new & (ratios >= 0.35)]
-                    if v_apply.size > 0:
-                        self._cache.apply_color_indices(v_apply, fill_rgba)
+                    valid_verts = verts[ratios >= 0.35] if ratios.size > 0 else verts
+                    if self._cache.color_domain == 'POINT':
+                        in_valid = np.isin(new_elems, valid_verts)
+                    else:
+                        in_valid = np.isin(self._cache.loop_verts[new_elems], valid_verts)
+                    v_apply = new_elems[in_valid]
                 else:
-                    self._cache.apply_color_indices(new_elems, fill_rgba)
-                mesh_dirty = True
+                    v_apply = new_elems
+
+                if v_apply.size > 0:
+                    self._stroke_elem_mask[v_apply] = True
+                    stroke["elem_chunks"].append(v_apply)
+                    stroke["old_color_chunks"].append(self._cache.color_buf[v_apply].copy())
+                    self._cache.apply_color_indices(v_apply, fill_rgba)
+                    mesh_dirty = True
 
         if target_mode == 'WEIGHT' and self._active_vertex_group is not None:
             vg = self._active_vertex_group

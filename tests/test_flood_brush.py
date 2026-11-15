@@ -1509,7 +1509,14 @@ class TestNormalAwareFloodBrush(unittest.TestCase):
         for av in apply_verts:
             self.assertAlmostEqual(vg.weight(int(av)), 1.0, places=4)
 
-        # 5. Texture paint with smooth_boundary=True (100% solid hard brush write)
+        # 4b. Vertex paint CORNER domain smooth trimming (smooth hard brush on mesh faces)
+        raw_loops = cache.faces_to_color_indices(sel_faces)
+        in_valid_loops = np.isin(cache.loop_verts[raw_loops], apply_verts)
+        trimmed_loops = raw_loops[in_valid_loops]
+        self.assertGreater(trimmed_loops.size, 0)
+        self.assertLess(trimmed_loops.size, raw_loops.size)
+
+        # 5. Texture paint with smooth_boundary=True (100% solid hard brush write & zero interior gaps)
         img = bpy.data.images.new("SmoothTestImg", width=128, height=128, alpha=True)
         img.pixels.foreach_set([1.0] * (128 * 128 * 4))
         uv_layer = obj.data.uv_layers.new(name="UVMap")
@@ -1525,6 +1532,12 @@ class TestNormalAwareFloodBrush(unittest.TestCase):
             uv_layer=uv_layer,
         )
         fill_col = (0.2, 0.4, 0.8, 1.0)
+        raw_idx, _ = t_cache.apply_texture_faces(
+            sel_faces,
+            fill_col,
+            commit=False,
+            smooth_boundary=False,
+        )
         flat_idx, old_px = t_cache.apply_texture_faces(
             sel_faces,
             fill_col,
@@ -1533,6 +1546,8 @@ class TestNormalAwareFloodBrush(unittest.TestCase):
         )
         self.assertGreater(flat_idx.size, 0)
         self.assertEqual(flat_idx.size, old_px.shape[0])
+        # Zero unpainted gaps: all original flood pixels are 100% preserved in smoothed texture
+        self.assertTrue(np.all(np.isin(raw_idx, flat_idx)))
         # Verify 100% solid write (hard brush, no partial alpha or checkered pixels)
         written_px = t_cache.tex_buf_flat[flat_idx]
         self.assertTrue(np.allclose(written_px[:, 3], 1.0, atol=1e-3))

@@ -1103,7 +1103,7 @@ class MeshFloodCache:
             uv_d01 = np.linalg.norm(sel_uvs[:, 0] - sel_uvs[:, 1], axis=1)
             uv_d12 = np.linalg.norm(sel_uvs[:, 1] - sel_uvs[:, 2], axis=1)
             avg_edge_px = float(np.median(np.concatenate((uv_d01, uv_d12)))) * max(w, h)
-            r = int(np.clip(round(avg_edge_px * 0.45), 2, 20))
+            r = int(np.clip(round(avg_edge_px * 0.35), 2, 8))
 
             sm = crop_mask.astype(np.float32)
             for _ in range(2):
@@ -1114,18 +1114,19 @@ class MeshFloodCache:
                 cs_y = np.cumsum(pad_y, axis=0)
                 sm = (cs_y[2 * r + 1:, :] - cs_y[:-2 * r - 1, :]) / (2 * r + 1)
 
-            smooth_crop = sm >= 0.5
-
-            # Keep within UV covered mask of the mesh so it doesn't bleed across islands
+            # Keep notch smoothing within UV covered mask of the mesh so it doesn't bleed across islands
             ts = self._uv_tile_size
             ty = np.arange(y_min // ts, y_max // ts + 1)
             tx = np.arange(x_min // ts, x_max // ts + 1)
             ty_g, tx_g = np.meshgrid(ty, tx, indexing='ij')
             self._ensure_uv_tiles_for_coords(ty_g.ravel() * ts, tx_g.ravel() * ts)
+            notch_fill = sm >= 0.35
             if self._uv_covered_mask is not None:
-                smooth_crop &= self._uv_covered_mask[y_min : y_max + 1, x_min : x_max + 1]
+                notch_fill &= self._uv_covered_mask[y_min : y_max + 1, x_min : x_max + 1]
 
-            crop_mask = smooth_crop
+            # Preserve 100% of all flooded faces (zero unpainted eye corners or interior gaps),
+            # while smoothly filling concave stair notches to eliminate jagged borders:
+            crop_mask = crop_mask | notch_fill
 
         # Dilate strictly on the thin fringe outside crop_mask into uncovered UV margin pixels.
         if self.tex_seam_bleed > 0:
