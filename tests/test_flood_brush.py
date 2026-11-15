@@ -24,7 +24,7 @@ from normal_aware_flood_brush.flood_engine import (
     smooth_local_texture_paint,
     smooth_local_vertex_paint,
 )
-from normal_aware_flood_brush.mesh_cache import MeshFloodCache
+from normal_aware_flood_brush.mesh_cache import MeshFloodCache, linear_to_srgb
 from normal_aware_flood_brush.operators import VIEW3D_OT_normal_flood_brush
 from normal_aware_flood_brush.overlay import FloodOverlayState
 from normal_aware_flood_brush.preferences import KEYMAP_SPECS, get_active_shortcut_label
@@ -1499,21 +1499,17 @@ class TestNormalAwareFloodBrush(unittest.TestCase):
         self.assertIsNotNone(col)
         self.assertEqual(len(col), 4)
 
-        # 4. Weight paint smooth boundary falloff calculation
+        # 4. Weight paint solid hard brush with smooth boundary trimming
         obj.vertex_groups.new(name="TestWeightSmooth")
         vg = obj.vertex_groups.active
         weight_val = 1.0
-        s_ratios = ratios * ratios * (3.0 - 2.0 * ratios)
-        for vi, s in zip(verts.tolist(), s_ratios.tolist()):
-            w = weight_val * s
-            vg.add([vi], float(w), 'REPLACE')
-        # Boundary vertex has weight < 1.0
-        boundary_verts = verts[ratios < 1.0]
-        self.assertGreater(boundary_verts.size, 0)
-        for bv in boundary_verts:
-            self.assertLess(vg.weight(int(bv)), 1.0)
+        apply_verts = verts[ratios >= 0.35]
+        self.assertGreater(apply_verts.size, 0)
+        vg.add(apply_verts.tolist(), weight_val, 'REPLACE')
+        for av in apply_verts:
+            self.assertAlmostEqual(vg.weight(int(av)), 1.0, places=4)
 
-        # 5. Texture paint with smooth_boundary=True
+        # 5. Texture paint with smooth_boundary=True (100% solid hard brush write)
         img = bpy.data.images.new("SmoothTestImg", width=128, height=128, alpha=True)
         img.pixels.foreach_set([1.0] * (128 * 128 * 4))
         uv_layer = obj.data.uv_layers.new(name="UVMap")
@@ -1528,14 +1524,22 @@ class TestNormalAwareFloodBrush(unittest.TestCase):
             tex_image=img,
             uv_layer=uv_layer,
         )
+        fill_col = (0.2, 0.4, 0.8, 1.0)
         flat_idx, old_px = t_cache.apply_texture_faces(
             sel_faces,
-            (0.2, 0.4, 0.8, 1.0),
+            fill_col,
             commit=True,
             smooth_boundary=True,
         )
         self.assertGreater(flat_idx.size, 0)
         self.assertEqual(flat_idx.size, old_px.shape[0])
+        # Verify 100% solid write (hard brush, no partial alpha or checkered pixels)
+        written_px = t_cache.tex_buf_flat[flat_idx]
+        self.assertTrue(np.allclose(written_px[:, 3], 1.0, atol=1e-3))
+        exp_rgb = linear_to_srgb(np.asarray(fill_col[:3], dtype=np.float32)) if t_cache.tex_is_srgb else np.asarray(fill_col[:3], dtype=np.float32)
+        self.assertTrue(np.allclose(written_px[:, :3], exp_rgb, atol=0.01))
+        # Zero variance: completely uniform solid hard brush fill
+        self.assertTrue(np.allclose(written_px[:, :3], written_px[0, :3], atol=1e-3))
 
 
 if __name__ == "__main__":

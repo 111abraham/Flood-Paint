@@ -1082,7 +1082,7 @@ class MeshFloodCache:
             return np.empty(0, dtype=np.int32), np.empty((0, 4), dtype=np.float32)
 
         w, h = self.tex_width, self.tex_height
-        pad = self.tex_seam_bleed + 1
+        pad = self.tex_seam_bleed + (24 if smooth_boundary else 2)
         x_min = max(0, int(np.floor(sel_uvs[:, :, 0].min() * w)) - pad)
         x_max = min(w - 1, int(np.ceil(sel_uvs[:, :, 0].max() * w)) + pad)
         y_min = max(0, int(np.floor(sel_uvs[:, :, 1].min() * h)) - pad)
@@ -1098,6 +1098,34 @@ class MeshFloodCache:
         )
         if not np.any(crop_mask):
             return np.empty(0, dtype=np.int32), np.empty((0, 4), dtype=np.float32)
+
+        if smooth_boundary and crop_h > 4 and crop_w > 4:
+            uv_d01 = np.linalg.norm(sel_uvs[:, 0] - sel_uvs[:, 1], axis=1)
+            uv_d12 = np.linalg.norm(sel_uvs[:, 1] - sel_uvs[:, 2], axis=1)
+            avg_edge_px = float(np.median(np.concatenate((uv_d01, uv_d12)))) * max(w, h)
+            r = int(np.clip(round(avg_edge_px * 0.45), 2, 20))
+
+            sm = crop_mask.astype(np.float32)
+            for _ in range(2):
+                pad_x = np.pad(sm, ((0, 0), (r + 1, r)), mode='edge')
+                cs_x = np.cumsum(pad_x, axis=1)
+                sm = (cs_x[:, 2 * r + 1:] - cs_x[:, :-2 * r - 1]) / (2 * r + 1)
+                pad_y = np.pad(sm, ((r + 1, r), (0, 0)), mode='edge')
+                cs_y = np.cumsum(pad_y, axis=0)
+                sm = (cs_y[2 * r + 1:, :] - cs_y[:-2 * r - 1, :]) / (2 * r + 1)
+
+            smooth_crop = sm >= 0.5
+
+            # Keep within UV covered mask of the mesh so it doesn't bleed across islands
+            ts = self._uv_tile_size
+            ty = np.arange(y_min // ts, y_max // ts + 1)
+            tx = np.arange(x_min // ts, x_max // ts + 1)
+            ty_g, tx_g = np.meshgrid(ty, tx, indexing='ij')
+            self._ensure_uv_tiles_for_coords(ty_g.ravel() * ts, tx_g.ravel() * ts)
+            if self._uv_covered_mask is not None:
+                smooth_crop &= self._uv_covered_mask[y_min : y_max + 1, x_min : x_max + 1]
+
+            crop_mask = smooth_crop
 
         # Dilate strictly on the thin fringe outside crop_mask into uncovered UV margin pixels.
         if self.tex_seam_bleed > 0:
@@ -1136,23 +1164,9 @@ class MeshFloodCache:
         if flat_idx.size == 0:
             return np.empty(0, dtype=np.int32), np.empty((0, 4), dtype=np.float32)
 
-        weights = None
-        if smooth_boundary and crop_h > 2 and crop_w > 2:
-            m = crop_mask.astype(np.float32)
-            cov = (
-                0.25 * m[1:-1, 1:-1]
-                + 0.125 * (m[:-2, 1:-1] + m[2:, 1:-1] + m[1:-1, :-2] + m[1:-1, 2:])
-                + 0.0625 * (m[:-2, :-2] + m[:-2, 2:] + m[2:, :-2] + m[2:, 2:])
-            )
-            w_arr = np.ones((crop_h, crop_w), dtype=np.float32)
-            w_arr[1:-1, 1:-1] = np.clip(cov * 1.5, 0.0, 1.0)
-            weights = w_arr[ry, rx]
-
         if stroke_tex_mask is not None:
             valid_mask = ~stroke_tex_mask[flat_idx]
             flat_idx = flat_idx[valid_mask]
-            if weights is not None:
-                weights = weights[valid_mask]
             if flat_idx.size == 0:
                 return np.empty(0, dtype=np.int32), np.empty((0, 4), dtype=np.float32)
             stroke_tex_mask[flat_idx] = True
@@ -1169,11 +1183,8 @@ class MeshFloodCache:
         write_col = write_col.copy() if write_col is write_lin else write_col
         write_col[3] = np.clip(write_col[3], 0.0, 1.0)
 
-        if weights is not None:
-            w_fac = weights[:, None]
-            self.tex_buf_flat[flat_idx] = old_pixels * (1.0 - w_fac) + write_col * w_fac
-        else:
-            self.tex_buf_flat[flat_idx] = write_col
+        # 100% solid hard brush write: NO alpha blending, NO checkered unpainted areas
+        self.tex_buf_flat[flat_idx] = write_col
         if self.face_tex_colors is not None:
             lin_upd = write_lin.copy()
             lin_upd[3] = write_col[3]

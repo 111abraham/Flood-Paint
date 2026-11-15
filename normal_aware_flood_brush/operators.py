@@ -715,33 +715,15 @@ class VIEW3D_OT_normal_flood_brush(bpy.types.Operator):
                 stroke["old_color_chunks"].append(self._cache.color_buf[new_elems].copy())
                 fill_rgba = get_effective_fill_rgba(context)
 
+                # Hard brush: 100% solid color, trim isolated single-quad stair bumps (ratios >= 0.35)
                 if props.smooth_tool and self._cache.color_domain == 'POINT':
                     verts, ratios = self._cache.faces_to_vert_incident_coverage(new_faces)
                     in_new = np.isin(verts, new_elems)
-                    v_apply = verts[in_new]
-                    r_apply = ratios[in_new]
-                    s_ratios = r_apply * r_apply * (3.0 - 2.0 * r_apply)
-                    old_c = self._cache.color_buf[v_apply]
-                    target_c = np.asarray(fill_rgba, dtype=np.float32)
-                    blended = old_c * (1.0 - s_ratios[:, None]) + target_c[None, :] * s_ratios[:, None]
-                    self._cache.color_buf[v_apply] = blended
-                    if self._cache.srgb_buf is not None:
-                        srgb = np.empty_like(blended)
-                        srgb[:, :3] = linear_to_srgb(blended[:, :3])
-                        srgb[:, 3] = np.clip(blended[:, 3], 0.0, 1.0)
-                        self._cache.srgb_buf[v_apply] = srgb
-                    self._cache.push_color_buffer()
+                    v_apply = verts[in_new & (ratios >= 0.35)]
+                    if v_apply.size > 0:
+                        self._cache.apply_color_indices(v_apply, fill_rgba)
                 else:
                     self._cache.apply_color_indices(new_elems, fill_rgba)
-
-                if props.smooth_tool and self._last_hit_pos is not None:
-                    smooth_local_vertex_paint(
-                        cache=self._cache,
-                        hit_pos=self._last_hit_pos,
-                        radius=props.fill_radius,
-                        iterations=1,
-                        strength=0.5,
-                    )
                 mesh_dirty = True
 
         if target_mode == 'WEIGHT' and self._active_vertex_group is not None:
@@ -749,30 +731,21 @@ class VIEW3D_OT_normal_flood_brush(bpy.types.Operator):
             weight_val = get_effective_weight_value(context)
             if props.smooth_tool:
                 verts, ratios = self._cache.faces_to_vert_incident_coverage(new_faces)
+                apply_verts = verts[ratios >= 0.35] if ratios.size > 0 else verts
             else:
-                verts = self._cache.faces_to_vert_indices(new_faces)
-                ratios = None
+                apply_verts = self._cache.faces_to_vert_indices(new_faces)
 
-            if verts.size > 0:
+            if apply_verts.size > 0:
                 old_weights = {}
-                for v in verts:
-                    vi = int(v)
+                for vi in apply_verts.tolist():
                     try:
                         old_weights[vi] = vg.weight(vi)
                     except RuntimeError:
                         old_weights[vi] = None
 
-                if ratios is not None:
-                    s_ratios = ratios * ratios * (3.0 - 2.0 * ratios)
-                    for vi, s in zip(verts.tolist(), s_ratios.tolist()):
-                        old_w = old_weights.get(vi)
-                        old_val = 0.0 if old_w is None else float(old_w)
-                        w = old_val * (1.0 - s) + weight_val * s
-                        vg.add([vi], float(w), 'REPLACE')
-                else:
-                    vg.add(verts.tolist(), weight_val, 'REPLACE')
-
-                stroke["weight_chunks"].append((vg, old_weights, verts.copy()))
+                # Hard brush: 100% solid weight, no checkered fractional spots
+                vg.add(apply_verts.tolist(), weight_val, 'REPLACE')
+                stroke["weight_chunks"].append((vg, old_weights, apply_verts.copy()))
                 mesh_dirty = True
 
         if mesh_dirty:
