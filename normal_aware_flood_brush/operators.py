@@ -1620,6 +1620,78 @@ class VIEW3D_OT_flood_weight_toggle(bpy.types.Operator):
         return {'FINISHED'}
 
 
+def _rgb_to_cylindrical_hsv(rgb: np.ndarray) -> np.ndarray:
+    """Convert (N, 3) linear RGB to cylindrical (x, y, z) in HSV space: x=S*cos(2pi*H), y=S*sin(2pi*H), z=V."""
+    if rgb.size == 0:
+        return np.empty((0, 3), dtype=np.float32)
+    r, g, b = rgb[:, 0], rgb[:, 1], rgb[:, 2]
+    max_c = np.maximum(np.maximum(r, g), b)
+    min_c = np.minimum(np.minimum(r, g), b)
+    delta = max_c - min_c
+
+    v = max_c
+    s = np.zeros_like(max_c)
+    nz_v = max_c > 1e-6
+    s[nz_v] = delta[nz_v] / max_c[nz_v]
+
+    h = np.zeros_like(max_c)
+    nz_d = delta > 1e-6
+
+    idx_r = nz_d & (max_c == r)
+    h[idx_r] = ((g[idx_r] - b[idx_r]) / delta[idx_r]) % 6.0
+
+    idx_g = nz_d & (max_c == g) & ~idx_r
+    h[idx_g] = ((b[idx_g] - r[idx_g]) / delta[idx_g]) + 2.0
+
+    idx_b = nz_d & (max_c == b) & ~idx_r & ~idx_g
+    h[idx_b] = ((r[idx_b] - g[idx_b]) / delta[idx_b]) + 4.0
+
+    h_rad = ((h / 6.0) % 1.0) * (2.0 * math.pi)
+
+    cx = s * np.cos(h_rad)
+    cy = s * np.sin(h_rad)
+    cz = v
+    return np.column_stack((cx, cy, cz))
+
+
+def _match_color_array(
+    cols_rgb: np.ndarray,
+    ref_rgb: np.ndarray,
+    match_mode: str,
+    threshold: float,
+    palette_rgbs: np.ndarray | None = None,
+    target_pal_idx: int | None = None,
+) -> np.ndarray:
+    """Return boolean mask indicating which elements in cols_rgb match ref_rgb according to match_mode."""
+    if cols_rgb.shape[0] == 0:
+        return np.empty(0, dtype=bool)
+
+    if match_mode == 'EXACT':
+        # Strict coloring book match: max per-channel difference <= 0.015 (absorbs BYTE_COLOR/float rounding only)
+        diff = np.max(np.abs(cols_rgb[:, :3] - ref_rgb), axis=1)
+        return diff <= 0.015
+
+    if match_mode == 'PALETTE' and palette_rgbs is not None and palette_rgbs.size > 0 and target_pal_idx is not None:
+        # Voronoi partitioning: assign each color to its closest palette swatch
+        dists = np.linalg.norm(cols_rgb[:, None, :3] - palette_rgbs[None, :, :], axis=2)
+        closest = np.argmin(dists, axis=1)
+        # Assign if closest to target swatch and within reasonable canvas distance (< 0.40)
+        return (closest == target_pal_idx) & (dists[:, target_pal_idx] <= 0.40)
+
+    if match_mode == 'HSV':
+        # Cylindrical HSV space: decouples Hue from Saturation and Value
+        cyl_cols = _rgb_to_cylindrical_hsv(cols_rgb[:, :3])
+        cyl_ref = _rgb_to_cylindrical_hsv(ref_rgb.reshape(1, 3))[0]
+        diff = cyl_cols - cyl_ref
+        dist = np.sqrt(np.sum(diff * diff, axis=1))
+        return dist <= threshold
+
+    # Default 'RGB': standard Euclidean RGB distance
+    diff = cols_rgb[:, :3] - ref_rgb
+    dist = np.sqrt(np.sum(diff * diff, axis=1))
+    return dist <= threshold
+
+
 class VIEW3D_OT_flood_color_to_vertex_group(bpy.types.Operator):
     """Convert vertices painted with the chosen swatch/fill color into a dedicated Vertex Group"""
 
@@ -1628,6 +1700,33 @@ class VIEW3D_OT_flood_color_to_vertex_group(bpy.types.Operator):
     bl_description = "Convert vertices painted with the chosen swatch/fill color into a dedicated Vertex Group"
     bl_options = {'REGISTER', 'UNDO'}
 
+    match_mode: bpy.props.EnumProperty(
+        name="Match Mode",
+        description="Method used to match colors when creating vertex groups",
+        items=[
+            (
+                'EXACT',
+                "Exact Swatch (Coloring Book)",
+                "Match the exact swatch color without tolerance fiddling (ideal for flat coloring books)",
+            ),
+            (
+                'PALETTE',
+                "Nearest Palette Swatch",
+                "Assign vertices to nearest swatch in active palette (Voronoi partitioning, zero overlap)",
+            ),
+            (
+                'HSV',
+                "Perceptual HSV",
+                "Match in cylindrical HSV space, cleanly decoupling Hue from Saturation and Value",
+            ),
+            (
+                'RGB',
+                "RGB Distance",
+                "Match using Euclidean RGB distance with tolerance slider",
+            ),
+        ],
+        default='EXACT',
+    )
     color: bpy.props.FloatVectorProperty(
         name="Color",
         subtype='COLOR',
@@ -1642,7 +1741,7 @@ class VIEW3D_OT_flood_color_to_vertex_group(bpy.types.Operator):
         default=0.08,
         min=0.0,
         max=1.0,
-        description="Color matching distance tolerance",
+        description="Color matching distance tolerance (used in HSV and RGB modes)",
     )
     weight: bpy.props.FloatProperty(
         name="Weight",
@@ -1667,7 +1766,20 @@ class VIEW3D_OT_flood_color_to_vertex_group(bpy.types.Operator):
         return context.active_object is not None and context.active_object.type == 'MESH'
 
     def invoke(self, context, event):
-        self.color = get_effective_fill_rgba(context)
+        props = getattr(context.scene, "normal_flood_brush", None)
+        if props is not None:
+            self.match_mode = props.color_match_mode
+            self.threshold = props.color_tolerance
+
+        # If a palette swatch is active, use its exact color
+        paint_settings = get_paint_settings(context)
+        pal = getattr(paint_settings, 'palette', None) if paint_settings is not None else None
+        if pal is not None and getattr(pal.colors, 'active', None) is not None:
+            c = pal.colors.active.color
+            self.color = (float(c[0]), float(c[1]), float(c[2]), 1.0)
+        else:
+            self.color = get_effective_fill_rgba(context)
+
         return self.execute(context)
 
     def execute(self, context):
@@ -1687,6 +1799,16 @@ class VIEW3D_OT_flood_color_to_vertex_group(bpy.types.Operator):
         if num_verts == 0:
             self.report({'WARNING'}, "Mesh has no vertices")
             return {'CANCELLED'}
+
+        # Gather palette colors for Voronoi palette partitioning if applicable
+        paint_settings = get_paint_settings(context)
+        pal = getattr(paint_settings, 'palette', None) if paint_settings is not None else None
+        palette_rgbs = None
+        target_pal_idx = None
+        if pal is not None and len(pal.colors) > 0:
+            palette_rgbs = np.array([c.color for c in pal.colors], dtype=np.float32)
+            pal_dists = np.linalg.norm(palette_rgbs - ref_rgb, axis=1)
+            target_pal_idx = int(np.argmin(pal_dists))
 
         matching_verts = np.empty(0, dtype=np.int32)
         matched_source = ""
@@ -1722,9 +1844,15 @@ class VIEW3D_OT_flood_color_to_vertex_group(bpy.types.Operator):
                     if ca.domain == 'POINT':
                         cols = np.empty((num_verts, 4), dtype=np.float32)
                         ca.data.foreach_get('color', cols.ravel())
-                        diff = cols[:, :3] - ref_rgb
-                        dist = np.sqrt(np.sum(diff * diff, axis=1))
-                        matches = np.where(dist <= self.threshold)[0]
+                        valid_mask = _match_color_array(
+                            cols,
+                            ref_rgb,
+                            self.match_mode,
+                            self.threshold,
+                            palette_rgbs,
+                            target_pal_idx,
+                        )
+                        matches = np.where(valid_mask)[0]
                         if matches.size > 0:
                             matching_verts = matches
                             matched_source = f"Color Attribute '{ca.name}' (Point)"
@@ -1734,9 +1862,14 @@ class VIEW3D_OT_flood_color_to_vertex_group(bpy.types.Operator):
                         ca.data.foreach_get('color', loop_cols.ravel())
                         loop_verts = np.empty(num_loops, dtype=np.int32)
                         mesh.loops.foreach_get('vertex_index', loop_verts)
-                        diff = loop_cols[:, :3] - ref_rgb
-                        dist = np.sqrt(np.sum(diff * diff, axis=1))
-                        valid_loops = dist <= self.threshold
+                        valid_loops = _match_color_array(
+                            loop_cols,
+                            ref_rgb,
+                            self.match_mode,
+                            self.threshold,
+                            palette_rgbs,
+                            target_pal_idx,
+                        )
                         if np.any(valid_loops):
                             matching_verts = np.unique(loop_verts[valid_loops])
                             matched_source = f"Color Attribute '{ca.name}' (Corner)"
@@ -1759,16 +1892,21 @@ class VIEW3D_OT_flood_color_to_vertex_group(bpy.types.Operator):
                     img_buf = np.empty((w * h, 4), dtype=np.float32)
                     tex_img.pixels.foreach_get(img_buf.ravel())
                     sampled_cols = img_buf[pix_indices]
-                    diff = sampled_cols[:, :3] - ref_rgb
-                    dist = np.sqrt(np.sum(diff * diff, axis=1))
-                    valid_loops = dist <= self.threshold
+                    valid_loops = _match_color_array(
+                        sampled_cols,
+                        ref_rgb,
+                        self.match_mode,
+                        self.threshold,
+                        palette_rgbs,
+                        target_pal_idx,
+                    )
                     if np.any(valid_loops):
                         matching_verts = np.unique(loop_verts[valid_loops])
                         matched_source = f"Texture '{tex_img.name}'"
                         break
 
         if matching_verts.size == 0:
-            self.report({'WARNING'}, f"No vertices match color {hex_code} within tolerance {self.threshold:.2f}")
+            self.report({'WARNING'}, f"No vertices match color {hex_code} using {self.match_mode} mode")
             return {'CANCELLED'}
 
         vg_name = self.group_name.strip() if self.group_name.strip() else f"Color_{hex_code}"
@@ -1783,6 +1921,14 @@ class VIEW3D_OT_flood_color_to_vertex_group(bpy.types.Operator):
 
         vg.add(matching_verts.tolist(), self.weight, 'REPLACE')
         obj.vertex_groups.active = vg
+
+        for window in context.window_manager.windows:
+            for area in window.screen.areas:
+                if area.type == 'VIEW_3D':
+                    area.tag_redraw()
+
+        self.report({'INFO'}, f"Assigned {matching_verts.size:,} vertices to Vertex Group '{vg.name}' ({self.match_mode} mode, {matched_source})")
+        return {'FINISHED'}
 
         for window in context.window_manager.windows:
             for area in window.screen.areas:

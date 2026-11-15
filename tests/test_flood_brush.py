@@ -1824,6 +1824,55 @@ class TestNormalAwareFloodBrush(unittest.TestCase):
         self.assertEqual(res, {'FINISHED'})
         self.assertIn("Green_Group", tex_cyl.vertex_groups)
 
+        # 7. Exact Match vs Hue/Saturation/Value (Coloring Book mode)
+        bpy.ops.mesh.primitive_grid_add(x_subdivisions=10, y_subdivisions=10)
+        grid = bpy.context.active_object
+        grid_mesh = grid.data
+        ca_sat = grid_mesh.color_attributes.new(name="SatValTest", type='FLOAT_COLOR', domain='CORNER')
+        cols = np.zeros((len(grid_mesh.loops), 4), dtype=np.float32)
+        # Swatch 1: Peach skin (Hue=24, S=0.35, V=0.96)
+        cols[:len(grid_mesh.loops)//2] = [0.96, 0.74, 0.62, 1.0]
+        # Swatch 2: Skin shadow (Same Hue=24, diff S=0.45, V=0.82)
+        cols[len(grid_mesh.loops)//2:] = [0.82, 0.56, 0.45, 1.0]
+        ca_sat.data.foreach_set('color', cols.ravel())
+
+        # Exact match mode: zero bleed into similar hue with diff Saturation/Value
+        props.color_match_mode = 'EXACT'
+        res = bpy.ops.view3d.flood_color_to_vertex_group(
+            match_mode='EXACT',
+            color=(0.96, 0.74, 0.62, 1.0),
+            group_name="Skin_Base",
+        )
+        self.assertEqual(res, {'FINISHED'})
+        self.assertIn("Skin_Base", grid.vertex_groups)
+        vg_base = grid.vertex_groups["Skin_Base"]
+
+        res = bpy.ops.view3d.flood_color_to_vertex_group(
+            match_mode='EXACT',
+            color=(0.82, 0.56, 0.45, 1.0),
+            group_name="Skin_Shadow",
+        )
+        self.assertEqual(res, {'FINISHED'})
+        self.assertIn("Skin_Shadow", grid.vertex_groups)
+        vg_shadow = grid.vertex_groups["Skin_Shadow"]
+
+        # 8. Nearest Palette (Voronoi) match mode
+        pal = bpy.data.palettes.new("ColorBookPal")
+        c_base = pal.colors.new()
+        c_base.color = (0.96, 0.74, 0.62)
+        c_shadow = pal.colors.new()
+        c_shadow.color = (0.82, 0.56, 0.45)
+        bpy.context.tool_settings.vertex_paint.palette = pal
+        pal.colors.active = c_base
+
+        res = bpy.ops.view3d.flood_color_to_vertex_group(
+            match_mode='PALETTE',
+            color=(0.96, 0.74, 0.62, 1.0),
+            group_name="Pal_Base",
+        )
+        self.assertEqual(res, {'FINISHED'})
+        self.assertIn("Pal_Base", grid.vertex_groups)
+
 
 if __name__ == "__main__":
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(TestNormalAwareFloodBrush)

@@ -364,6 +364,50 @@ class NormalFloodBrushProperties(bpy.types.PropertyGroup):
         description="Render a real-time 3D preview overlay of the flooded region and boundary under the cursor",
         default=True,
     )
+    color_match_mode: EnumProperty(
+        name="Match Mode",
+        description="Method used to match colors when creating vertex groups from swatches",
+        items=[
+            (
+                'EXACT',
+                "Exact Swatch (Coloring Book)",
+                "Matches the exact swatch color without tolerance fiddling (ideal for flat coloring books)",
+                'RESTRICT_COLOR_OFF',
+                0,
+            ),
+            (
+                'PALETTE',
+                "Nearest Palette Swatch",
+                "Assigns vertices to the closest swatch in the active palette (Voronoi partitioning, zero overlap)",
+                'COLOR',
+                1,
+            ),
+            (
+                'HSV',
+                "Perceptual HSV",
+                "Matches in cylindrical HSV space, cleanly decoupling Hue from Saturation and Value",
+                'NODE_TEXTURE',
+                2,
+            ),
+            (
+                'RGB',
+                "RGB Distance",
+                "Matches using standard Euclidean RGB distance with tolerance slider",
+                'COLOR',
+                3,
+            ),
+        ],
+        default='EXACT',
+    )
+    color_tolerance: FloatProperty(
+        name="Color Tolerance",
+        description="Tolerance distance for HSV and RGB matching modes",
+        default=0.08,
+        min=0.0,
+        max=1.0,
+        precision=3,
+        subtype='FACTOR',
+    )
 
 
 classes = (

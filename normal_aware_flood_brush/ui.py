@@ -55,7 +55,12 @@ class VIEW3D_PT_normal_flood_brush(bpy.types.Panel):
                     wp_box.label(text=f"Active Group: {vg.name}", icon='VERTEXSEL')
                 else:
                     wp_box.label(text="No active group (auto-creates on start)", icon='INFO')
-            vg_row = wp_box.row(align=True)
+            vg_box = wp_box.box()
+            vg_box.label(text="Color to Vertex Group", icon='GROUP_VERTEX')
+            vg_box.prop(props, "color_match_mode", text="Mode")
+            if props.color_match_mode in {'HSV', 'RGB'}:
+                vg_box.prop(props, "color_tolerance", text="Tolerance", slider=True)
+            vg_row = vg_box.row(align=True)
             vg_row.scale_y = 1.2
             vg_row.operator(
                 "view3d.flood_color_to_vertex_group",
@@ -95,7 +100,12 @@ class VIEW3D_PT_normal_flood_brush(bpy.types.Panel):
                 if props.sync_brush_color and context.mode not in {'SCULPT', 'PAINT_VERTEX', 'PAINT_TEXTURE'}:
                     color_box.label(text="Enter a Paint or Sculpt mode to sync brush color.", icon='INFO')
 
-            vg_row = color_box.row(align=True)
+            vg_box = color_box.box()
+            vg_box.label(text="Color to Vertex Group", icon='GROUP_VERTEX')
+            vg_box.prop(props, "color_match_mode", text="Mode")
+            if props.color_match_mode in {'HSV', 'RGB'}:
+                vg_box.prop(props, "color_tolerance", text="Tolerance", slider=True)
+            vg_row = vg_box.row(align=True)
             vg_row.scale_y = 1.2
             vg_row.operator(
                 "view3d.flood_color_to_vertex_group",
