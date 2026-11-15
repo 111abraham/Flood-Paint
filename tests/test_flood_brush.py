@@ -1635,6 +1635,195 @@ class TestNormalAwareFloodBrush(unittest.TestCase):
         overlap = np.intersect1d(flat_idx, neighbor_idx)
         self.assertEqual(len(overlap), 0, "Paint must not bleed onto neighboring mesh faces!")
 
+    def test_23_ctrl_scroll_weight_toggle_and_color_to_vertex_group(self):
+        """Verify Ctrl+Scroll expand/contract, Weight Paint X toggle, and Color to Vertex Group conversion."""
+        from types import SimpleNamespace
+        from normal_aware_flood_brush.operators import (
+            VIEW3D_OT_normal_flood_brush,
+            VIEW3D_OT_flood_weight_toggle,
+            VIEW3D_OT_flood_color_to_vertex_group,
+        )
+        from normal_aware_flood_brush.overlay import FloodOverlayState
+
+        class MockRegion:
+            def __init__(self, rtype, x, y, w, h):
+                self.type = rtype
+                self.x = x
+                self.y = y
+                self.width = w
+                self.height = h
+
+        class MockArea:
+            def __init__(self, x, y, w, h, regions):
+                self.type = 'VIEW_3D'
+                self.x = x
+                self.y = y
+                self.width = w
+                self.height = h
+                self.regions = regions
+
+            def tag_redraw(self):
+                pass
+
+        mock_area = MockArea(0, 0, 1000, 800, [MockRegion('WINDOW', 0, 0, 1000, 800)])
+
+        class MockOp:
+            def __init__(self, area):
+                self._area = area
+                self._window_reg = area.regions[0]
+                self._rv3d = None
+                self._cache = None
+                self._overlay = FloodOverlayState(area)
+                self._target_mode = 'WEIGHT'
+                self._is_painting = False
+                self._is_navigating = False
+                self._is_resizing = False
+                self._resize_locked_toggle = False
+                self._resize_anchor_x = 0
+                self._resize_start_radius = 0.5
+                self._undo_stack = []
+
+            def _is_over_ui(self, mx, my):
+                return False
+
+            def _sync_overlay_props(self, context):
+                pass
+
+            def _redraw_viewport(self, context):
+                pass
+
+            def _refresh_at_last_hit(self, context):
+                pass
+
+            def modal(self, context, event):
+                return VIEW3D_OT_normal_flood_brush.modal(self, context, event)
+
+        def make_event(etype, val='PRESS', mx=500, my=500, shift=False, ctrl=False, alt=False):
+            return SimpleNamespace(
+                type=etype,
+                value=val,
+                mouse_x=mx,
+                mouse_y=my,
+                shift=shift,
+                ctrl=ctrl,
+                alt=alt,
+            )
+
+        props = bpy.context.scene.normal_flood_brush
+        op = MockOp(mock_area)
+
+        # 1. Ctrl + Scroll increments and decrements props.boundary_offset
+        props.boundary_offset = 0
+        res = op.modal(bpy.context, make_event('WHEELUPMOUSE', ctrl=True))
+        self.assertEqual(res, {'RUNNING_MODAL'})
+        self.assertEqual(props.boundary_offset, 1)
+
+        res = op.modal(bpy.context, make_event('WHEELUPMOUSE', ctrl=True))
+        self.assertEqual(props.boundary_offset, 2)
+
+        res = op.modal(bpy.context, make_event('WHEELDOWNMOUSE', ctrl=True))
+        self.assertEqual(props.boundary_offset, 1)
+
+        res = op.modal(bpy.context, make_event('WHEELDOWNMOUSE', ctrl=True))
+        self.assertEqual(props.boundary_offset, 0)
+
+        # 1b. Regular scroll without Ctrl controls normal_angle_threshold
+        props.normal_angle_threshold = 20.0
+        res = op.modal(bpy.context, make_event('WHEELUPMOUSE', ctrl=False))
+        self.assertEqual(res, {'RUNNING_MODAL'})
+        self.assertEqual(props.normal_angle_threshold, 22.0)
+
+        # 1c. Wheel with Alt passes through to navigation
+        res = op.modal(bpy.context, make_event('WHEELUPMOUSE', alt=True))
+        self.assertEqual(res, {'PASS_THROUGH'})
+
+        # 2. X key in Weight mode toggles weight between 1.0 and 0.0
+        props.weight_value = 1.0
+        res = op.modal(bpy.context, make_event('X', 'PRESS'))
+        self.assertEqual(res, {'RUNNING_MODAL'})
+        self.assertAlmostEqual(props.weight_value, 0.0, places=4)
+
+        res = op.modal(bpy.context, make_event('X', 'PRESS'))
+        self.assertEqual(res, {'RUNNING_MODAL'})
+        self.assertAlmostEqual(props.weight_value, 1.0, places=4)
+
+        # 3. Vanilla Blender Weight Paint toggle operator
+        bpy.ops.mesh.primitive_cube_add()
+        cube = bpy.context.active_object
+        bpy.ops.object.mode_set(mode='WEIGHT_PAINT')
+        wp = bpy.context.tool_settings.weight_paint
+        if wp and wp.brush:
+            wp.brush.weight = 1.0
+        props.weight_value = 1.0
+        res = bpy.ops.view3d.flood_weight_toggle()
+        self.assertEqual(res, {'FINISHED'})
+        self.assertAlmostEqual(props.weight_value, 0.0, places=4)
+        if wp and wp.brush:
+            self.assertAlmostEqual(wp.brush.weight, 0.0, places=4)
+
+        res = bpy.ops.view3d.flood_weight_toggle()
+        self.assertEqual(res, {'FINISHED'})
+        self.assertAlmostEqual(props.weight_value, 1.0, places=4)
+        if wp and wp.brush:
+            self.assertAlmostEqual(wp.brush.weight, 1.0, places=4)
+
+        # 4. Color to Vertex Group conversion (CORNER domain Color Attribute)
+        bpy.ops.object.mode_set(mode='OBJECT')
+        bpy.ops.mesh.primitive_cylinder_add(vertices=16)
+        cyl = bpy.context.active_object
+        mesh = cyl.data
+        ca = mesh.color_attributes.new(name="TestCol", type='FLOAT_COLOR', domain='CORNER')
+        loop_cols = np.zeros((len(mesh.loops), 4), dtype=np.float32)
+        # Color top half blue (0, 0, 1, 1)
+        loop_cols[:len(mesh.loops)//2] = [0.0, 0.0, 1.0, 1.0]
+        ca.data.foreach_set('color', loop_cols.ravel())
+
+        props.fill_color = (0.0, 0.0, 1.0, 1.0)
+        res = bpy.ops.view3d.flood_color_to_vertex_group(color=(0.0, 0.0, 1.0, 1.0), group_name="Blue_Group")
+        self.assertEqual(res, {'FINISHED'})
+        self.assertIn("Blue_Group", cyl.vertex_groups)
+        vg_blue = cyl.vertex_groups["Blue_Group"]
+        self.assertEqual(cyl.vertex_groups.active, vg_blue)
+
+        # Verify vertices with blue color have weight 1.0
+        loop_verts = np.empty(len(mesh.loops), dtype=np.int32)
+        mesh.loops.foreach_get('vertex_index', loop_verts)
+        blue_verts = np.unique(loop_verts[:len(mesh.loops)//2])
+        self.assertGreater(blue_verts.size, 0)
+        for bv in blue_verts:
+            self.assertAlmostEqual(vg_blue.weight(int(bv)), 1.0, places=4)
+
+        # 5. Color to Vertex Group conversion (POINT domain Color Attribute)
+        ca_pt = mesh.color_attributes.new(name="PointCol", type='FLOAT_COLOR', domain='POINT')
+        mesh.color_attributes.active_color = ca_pt
+        pt_cols = np.zeros((len(mesh.vertices), 4), dtype=np.float32)
+        pt_cols[:8] = [1.0, 0.5, 0.0, 1.0]
+        ca_pt.data.foreach_set('color', pt_cols.ravel())
+
+        res = bpy.ops.view3d.flood_color_to_vertex_group(color=(1.0, 0.5, 0.0, 1.0), group_name="Orange_Group")
+        self.assertEqual(res, {'FINISHED'})
+        self.assertIn("Orange_Group", cyl.vertex_groups)
+        vg_orange = cyl.vertex_groups["Orange_Group"]
+        for vi in range(8):
+            self.assertAlmostEqual(vg_orange.weight(vi), 1.0, places=4)
+
+        # 6. Color to Vertex Group conversion (UV Image Texture)
+        bpy.ops.mesh.primitive_cylinder_add(vertices=16)
+        tex_cyl = bpy.context.active_object
+        tex_mesh = tex_cyl.data
+        t_img = bpy.data.images.new("TexGroupImg", 64, 64)
+        t_pix = np.zeros((64 * 64, 4), dtype=np.float32)
+        t_pix[:] = [0.0, 1.0, 0.0, 1.0]  # Solid green
+        t_img.pixels.foreach_set(t_pix.ravel())
+        t_uv = tex_mesh.uv_layers.new(name="UVMap")
+        bpy.context.view_layer.update()
+
+        props.texpaint_target = 'TEXTURE'
+        bpy.context.tool_settings.image_paint.canvas = t_img
+        res = bpy.ops.view3d.flood_color_to_vertex_group(color=(0.0, 1.0, 0.0, 1.0), group_name="Green_Group")
+        self.assertEqual(res, {'FINISHED'})
+        self.assertIn("Green_Group", tex_cyl.vertex_groups)
+
 
 if __name__ == "__main__":
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(TestNormalAwareFloodBrush)

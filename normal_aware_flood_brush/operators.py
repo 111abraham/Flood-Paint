@@ -915,19 +915,37 @@ class VIEW3D_OT_normal_flood_brush(bpy.types.Operator):
             self._cleanup(context)
             return {'FINISHED'}
 
-        # Switch/flip foreground and background color swatches of Blender (X key).
+        # Switch/flip foreground and background color swatches of Blender (or toggle weight 0/1 in Weight Paint mode).
         if event.type == 'X' and not event.ctrl and not event.alt and not event.shift and event.value == 'PRESS':
             if self._is_resizing:
                 self._exit_resize(context)
-            new_rgba = flip_brush_colors(context)
-            self._sync_overlay_props(context)
-            self._overlay.set_toast(
-                f"Switched Swatch Color: ({new_rgba[0]:.2f}, {new_rgba[1]:.2f}, {new_rgba[2]:.2f})",
-                duration=1.2,
-            )
-            self._refresh_at_last_hit(context)
-            self._redraw_viewport(context)
-            return {'RUNNING_MODAL'}
+            if self._target_mode == 'WEIGHT':
+                new_w = 0.0 if props.weight_value >= 0.5 else 1.0
+                props.weight_value = new_w
+                wp = getattr(context.tool_settings, "weight_paint", None)
+                if wp and wp.brush and hasattr(wp.brush, "weight"):
+                    wp.brush.weight = new_w
+                ups = getattr(context.tool_settings, "unified_paint_settings", None)
+                if ups and hasattr(ups, "weight"):
+                    ups.weight = new_w
+                self._sync_overlay_props(context)
+                self._overlay.set_toast(
+                    f"Weight: {new_w:.1f}",
+                    duration=1.2,
+                )
+                self._refresh_at_last_hit(context)
+                self._redraw_viewport(context)
+                return {'RUNNING_MODAL'}
+            else:
+                new_rgba = flip_brush_colors(context)
+                self._sync_overlay_props(context)
+                self._overlay.set_toast(
+                    f"Switched Swatch Color: ({new_rgba[0]:.2f}, {new_rgba[1]:.2f}, {new_rgba[2]:.2f})",
+                    duration=1.2,
+                )
+                self._refresh_at_last_hit(context)
+                self._redraw_viewport(context)
+                return {'RUNNING_MODAL'}
 
         # Eyedropper / Sample color from 3D surface, UI palette, or cycle palette (E key or Alt+S).
         is_eyedropper = (
@@ -963,14 +981,24 @@ class VIEW3D_OT_normal_flood_brush(bpy.types.Operator):
                 self._redraw_viewport(context)
             return {'RUNNING_MODAL'}
 
-        # Boundary Expand / Contract hotkeys ([ to contract, ] to expand)
-        if event.type in {'LEFT_BRACKET', 'RIGHT_BRACKET'} and not event.ctrl and not event.alt and event.value == 'PRESS':
-            if event.type == 'LEFT_BRACKET':
-                props.boundary_offset = max(-50, props.boundary_offset - 1)
-            else:
-                props.boundary_offset = min(50, props.boundary_offset + 1)
+        # Boundary Expand / Contract: Ctrl+Scroll or Ctrl+[ / Ctrl+]
+        is_ctrl_scroll = (
+            event.type in {'WHEELUPMOUSE', 'WHEELDOWNMOUSE'}
+            and event.ctrl
+            and not event.alt
+            and not event.shift
+        )
+        is_ctrl_bracket = (
+            event.type in {'LEFT_BRACKET', 'RIGHT_BRACKET'}
+            and event.ctrl
+            and not event.alt
+            and event.value == 'PRESS'
+        )
+        if is_ctrl_scroll or is_ctrl_bracket:
+            direction = 1 if (event.type in {'WHEELUPMOUSE', 'RIGHT_BRACKET'}) else -1
+            props.boundary_offset = max(-50, min(50, props.boundary_offset + direction))
             state_str = f"{props.boundary_offset:+d}" if props.boundary_offset != 0 else "0"
-            self._overlay.set_toast(f"Boundary Offset: {state_str}", duration=1.2)
+            self._overlay.set_toast(f"Expand / Contract: {state_str}", duration=1.2)
             self._sync_overlay_props(context)
             self._refresh_at_last_hit(context)
             self._redraw_viewport(context)
@@ -1040,7 +1068,7 @@ class VIEW3D_OT_normal_flood_brush(bpy.types.Operator):
             return {'PASS_THROUGH'}
 
         if (
-            (event.type in {'WHEELUPMOUSE', 'WHEELDOWNMOUSE'} and (event.alt or event.ctrl or event.shift))
+            (event.type in {'WHEELUPMOUSE', 'WHEELDOWNMOUSE'} and (event.alt or event.shift))
             or event.type in {
                 'NUMPAD_0', 'NUMPAD_1', 'NUMPAD_2', 'NUMPAD_3', 'NUMPAD_4',
                 'NUMPAD_5', 'NUMPAD_6', 'NUMPAD_7', 'NUMPAD_8', 'NUMPAD_9',
@@ -1109,22 +1137,23 @@ class VIEW3D_OT_normal_flood_brush(bpy.types.Operator):
                 self._redraw_viewport(context)
                 return {'RUNNING_MODAL'}
 
-        # Adjust Normal Angle Threshold via Scroll Wheel or [ / ].
-        if event.type in {'WHEELUPMOUSE', 'WHEELDOWNMOUSE', 'LEFT_BRACKET', 'RIGHT_BRACKET'}:
-            is_press = event.type in {'WHEELUPMOUSE', 'WHEELDOWNMOUSE'} or event.value == 'PRESS'
-            if is_press:
-                direction = 1.0 if event.type in {'WHEELUPMOUSE', 'RIGHT_BRACKET'} else -1.0
-                step = 0.5 if event.alt else 2.0
-                props.normal_angle_threshold = max(
-                    0.0, min(180.0, props.normal_angle_threshold + direction * step)
-                )
-                self._overlay.set_toast(
-                    f"Normal Angle Threshold: {props.normal_angle_threshold:.1f}°",
-                    duration=1.1,
-                )
-                self._refresh_at_last_hit(context)
-                self._redraw_viewport(context)
-                return {'RUNNING_MODAL'}
+        # Adjust Normal Angle Threshold via Scroll Wheel or [ / ] (without Ctrl).
+        if (
+            (event.type in {'WHEELUPMOUSE', 'WHEELDOWNMOUSE'} and not event.ctrl and not event.alt and not event.shift)
+            or (event.type in {'LEFT_BRACKET', 'RIGHT_BRACKET'} and not event.ctrl and not event.alt and event.value == 'PRESS')
+        ):
+            direction = 1.0 if event.type in {'WHEELUPMOUSE', 'RIGHT_BRACKET'} else -1.0
+            step = 0.5 if event.alt else 2.0
+            props.normal_angle_threshold = max(
+                0.0, min(180.0, props.normal_angle_threshold + direction * step)
+            )
+            self._overlay.set_toast(
+                f"Normal Angle Threshold: {props.normal_angle_threshold:.1f}°",
+                duration=1.1,
+            )
+            self._refresh_at_last_hit(context)
+            self._redraw_viewport(context)
+            return {'RUNNING_MODAL'}
 
         # Left-Click press / release for continuous painting (or confirming radius resize).
         if event.type == 'LEFTMOUSE':
@@ -1548,6 +1577,222 @@ class VIEW3D_OT_flood_flip_colors(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class VIEW3D_OT_flood_weight_toggle(bpy.types.Operator):
+    """Toggle active brush weight between 1.0 and 0.0 in Weight Paint mode (Hotkey: X)"""
+
+    bl_idname = "view3d.flood_weight_toggle"
+    bl_label = "Toggle Weight (1 / 0)"
+    bl_description = "Toggle active brush weight between 1.0 and 0.0 in Weight Paint mode"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'PAINT_WEIGHT' or (
+            context.active_object is not None and context.active_object.type == 'MESH'
+        )
+
+    def execute(self, context):
+        props = getattr(context.scene, "normal_flood_brush", None)
+        wp = getattr(context.tool_settings, "weight_paint", None)
+        brush = getattr(wp, "brush", None)
+
+        current_w = 1.0
+        if brush is not None and hasattr(brush, "weight"):
+            current_w = brush.weight
+        elif props is not None:
+            current_w = props.weight_value
+
+        new_w = 0.0 if current_w >= 0.5 else 1.0
+
+        if brush is not None and hasattr(brush, "weight"):
+            brush.weight = new_w
+        ups = getattr(context.tool_settings, "unified_paint_settings", None)
+        if ups is not None and hasattr(ups, "weight"):
+            ups.weight = new_w
+        if props is not None:
+            props.weight_value = new_w
+
+        self.report({'INFO'}, f"Weight: {new_w:.1f}")
+        for window in context.window_manager.windows:
+            for area in window.screen.areas:
+                if area.type == 'VIEW_3D':
+                    area.tag_redraw()
+        return {'FINISHED'}
+
+
+class VIEW3D_OT_flood_color_to_vertex_group(bpy.types.Operator):
+    """Convert vertices painted with the chosen swatch/fill color into a dedicated Vertex Group"""
+
+    bl_idname = "view3d.flood_color_to_vertex_group"
+    bl_label = "Color to Vertex Group"
+    bl_description = "Convert vertices painted with the chosen swatch/fill color into a dedicated Vertex Group"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    color: bpy.props.FloatVectorProperty(
+        name="Color",
+        subtype='COLOR',
+        size=4,
+        min=0.0,
+        max=1.0,
+        default=(1.0, 1.0, 1.0, 1.0),
+        description="Target color to match on the mesh",
+    )
+    threshold: bpy.props.FloatProperty(
+        name="Tolerance",
+        default=0.08,
+        min=0.0,
+        max=1.0,
+        description="Color matching distance tolerance",
+    )
+    weight: bpy.props.FloatProperty(
+        name="Weight",
+        default=1.0,
+        min=0.0,
+        max=1.0,
+        description="Weight assigned to matching vertices",
+    )
+    group_name: bpy.props.StringProperty(
+        name="Group Name",
+        default="",
+        description="Custom name for vertex group (leave blank for Color_#HEX)",
+    )
+    replace_group: bpy.props.BoolProperty(
+        name="Replace Existing Group",
+        default=True,
+        description="If a group with the same name exists, replace its contents instead of creating Color.001",
+    )
+
+    @classmethod
+    def poll(cls, context):
+        return context.active_object is not None and context.active_object.type == 'MESH'
+
+    def invoke(self, context, event):
+        self.color = get_effective_fill_rgba(context)
+        return self.execute(context)
+
+    def execute(self, context):
+        obj = context.active_object
+        if obj is None or obj.type != 'MESH':
+            self.report({'ERROR'}, "Active object is not a mesh")
+            return {'CANCELLED'}
+
+        mesh = obj.data
+        props = getattr(context.scene, "normal_flood_brush", None)
+
+        ref_rgb = np.array(self.color[:3], dtype=np.float32)
+        hex_code = f"#{int(np.clip(ref_rgb[0] * 255, 0, 255)):02X}{int(np.clip(ref_rgb[1] * 255, 0, 255)):02X}{int(np.clip(ref_rgb[2] * 255, 0, 255)):02X}"
+
+        num_verts = len(mesh.vertices)
+        num_loops = len(mesh.loops)
+        if num_verts == 0:
+            self.report({'WARNING'}, "Mesh has no vertices")
+            return {'CANCELLED'}
+
+        matching_verts = np.empty(0, dtype=np.int32)
+        matched_source = ""
+
+        color_attrs = []
+        active_ca = get_mesh_active_color_attribute(mesh)
+        if active_ca is not None:
+            color_attrs.append(active_ca)
+        if hasattr(mesh, "color_attributes"):
+            for ca_item in mesh.color_attributes:
+                if ca_item not in color_attrs:
+                    color_attrs.append(ca_item)
+
+        tex_img, uv_layer, _ = resolve_texture_paint_target(context, obj)
+
+        use_tex_first = (context.mode == 'PAINT_TEXTURE' or (props and getattr(props, "texpaint_target", "") == 'TEXTURE'))
+
+        sources = []
+        if use_tex_first:
+            if tex_img is not None and uv_layer is not None:
+                sources.append('TEXTURE')
+            if color_attrs:
+                sources.append('COLOR_ATTR')
+        else:
+            if color_attrs:
+                sources.append('COLOR_ATTR')
+            if tex_img is not None and uv_layer is not None:
+                sources.append('TEXTURE')
+
+        for src in sources:
+            if src == 'COLOR_ATTR' and color_attrs:
+                for ca in color_attrs:
+                    if ca.domain == 'POINT':
+                        cols = np.empty((num_verts, 4), dtype=np.float32)
+                        ca.data.foreach_get('color', cols.ravel())
+                        diff = cols[:, :3] - ref_rgb
+                        dist = np.sqrt(np.sum(diff * diff, axis=1))
+                        matches = np.where(dist <= self.threshold)[0]
+                        if matches.size > 0:
+                            matching_verts = matches
+                            matched_source = f"Color Attribute '{ca.name}' (Point)"
+                            break
+                    else:  # CORNER
+                        loop_cols = np.empty((num_loops, 4), dtype=np.float32)
+                        ca.data.foreach_get('color', loop_cols.ravel())
+                        loop_verts = np.empty(num_loops, dtype=np.int32)
+                        mesh.loops.foreach_get('vertex_index', loop_verts)
+                        diff = loop_cols[:, :3] - ref_rgb
+                        dist = np.sqrt(np.sum(diff * diff, axis=1))
+                        valid_loops = dist <= self.threshold
+                        if np.any(valid_loops):
+                            matching_verts = np.unique(loop_verts[valid_loops])
+                            matched_source = f"Color Attribute '{ca.name}' (Corner)"
+                            break
+                if matching_verts.size > 0:
+                    break
+
+            elif src == 'TEXTURE' and tex_img is not None and uv_layer is not None:
+                w, h = tex_img.size[0], tex_img.size[1]
+                if w > 0 and h > 0:
+                    loop_uvs = np.empty((num_loops, 2), dtype=np.float32)
+                    uv_layer.data.foreach_get('uv', loop_uvs.ravel())
+                    loop_verts = np.empty(num_loops, dtype=np.int32)
+                    mesh.loops.foreach_get('vertex_index', loop_verts)
+
+                    u = np.clip(np.floor((loop_uvs[:, 0] % 1.0) * w).astype(np.int64), 0, w - 1)
+                    v = np.clip(np.floor((loop_uvs[:, 1] % 1.0) * h).astype(np.int64), 0, h - 1)
+                    pix_indices = v * w + u
+
+                    img_buf = np.empty((w * h, 4), dtype=np.float32)
+                    tex_img.pixels.foreach_get(img_buf.ravel())
+                    sampled_cols = img_buf[pix_indices]
+                    diff = sampled_cols[:, :3] - ref_rgb
+                    dist = np.sqrt(np.sum(diff * diff, axis=1))
+                    valid_loops = dist <= self.threshold
+                    if np.any(valid_loops):
+                        matching_verts = np.unique(loop_verts[valid_loops])
+                        matched_source = f"Texture '{tex_img.name}'"
+                        break
+
+        if matching_verts.size == 0:
+            self.report({'WARNING'}, f"No vertices match color {hex_code} within tolerance {self.threshold:.2f}")
+            return {'CANCELLED'}
+
+        vg_name = self.group_name.strip() if self.group_name.strip() else f"Color_{hex_code}"
+        existing_vg = obj.vertex_groups.get(vg_name)
+        if existing_vg is not None and self.replace_group:
+            obj.vertex_groups.remove(existing_vg)
+            vg = obj.vertex_groups.new(name=vg_name)
+        elif existing_vg is not None:
+            vg = existing_vg
+        else:
+            vg = obj.vertex_groups.new(name=vg_name)
+
+        vg.add(matching_verts.tolist(), self.weight, 'REPLACE')
+        obj.vertex_groups.active = vg
+
+        for window in context.window_manager.windows:
+            for area in window.screen.areas:
+                if area.type == 'VIEW_3D':
+                    area.tag_redraw()
+
+        self.report({'INFO'}, f"Assigned {matching_verts.size:,} vertices to Vertex Group '{vg.name}' ({matched_source})")
+        return {'FINISHED'}
+
+
 classes = (
     VIEW3D_OT_normal_flood_brush,
     VIEW3D_OT_smooth_jagged_borders,
@@ -1556,6 +1801,8 @@ classes = (
     VIEW3D_OT_flood_fill_unpainted,
     VIEW3D_OT_flood_reset_canvas,
     VIEW3D_OT_flood_flip_colors,
+    VIEW3D_OT_flood_weight_toggle,
+    VIEW3D_OT_flood_color_to_vertex_group,
 )
 
 

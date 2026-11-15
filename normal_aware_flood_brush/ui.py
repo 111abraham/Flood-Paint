@@ -55,6 +55,13 @@ class VIEW3D_PT_normal_flood_brush(bpy.types.Panel):
                     wp_box.label(text=f"Active Group: {vg.name}", icon='VERTEXSEL')
                 else:
                     wp_box.label(text="No active group (auto-creates on start)", icon='INFO')
+            vg_row = wp_box.row(align=True)
+            vg_row.scale_y = 1.2
+            vg_row.operator(
+                "view3d.flood_color_to_vertex_group",
+                text="Color to Vertex Group",
+                icon='GROUP_VERTEX',
+            )
         else:
             color_box = layout.box()
             header_row = color_box.row(align=True)
@@ -87,6 +94,14 @@ class VIEW3D_PT_normal_flood_brush(bpy.types.Panel):
                 row.operator("view3d.flood_flip_colors", text="", icon='ARROW_LEFTRIGHT')
                 if props.sync_brush_color and context.mode not in {'SCULPT', 'PAINT_VERTEX', 'PAINT_TEXTURE'}:
                     color_box.label(text="Enter a Paint or Sculpt mode to sync brush color.", icon='INFO')
+
+            vg_row = color_box.row(align=True)
+            vg_row.scale_y = 1.2
+            vg_row.operator(
+                "view3d.flood_color_to_vertex_group",
+                text="Color to Vertex Group",
+                icon='GROUP_VERTEX',
+            )
 
         # Flood propagation parameters.
         flood_box = layout.box()
@@ -212,7 +227,7 @@ class VIEW3D_PT_normal_flood_brush_shortcuts(bpy.types.Panel):
         col.label(text="Hover: Preview flood region", icon='MOUSE_MOVE')
         col.label(text="LMB Click / Drag: Flood paint", icon='MOUSE_LMB_DRAG')
         col.label(text="RMB / Enter / Space: Commit paint & exit", icon='CHECKMARK')
-        col.label(text="X: Flip foreground/background swatch", icon='ARROW_LEFTRIGHT')
+        col.label(text="X: Flip swatch color (Weight: toggle 1/0)", icon='ARROW_LEFTRIGHT')
         col.label(text="S: Toggle Smooth Tool (smooth jagged edges)", icon='MOD_SMOOTH')
         col.label(text="Shift+S: Smooth boundary mesh-wide", icon='MOD_SMOOTH')
         col.label(text="E (or Alt+S): Sample color (eyedropper)", icon='EYEDROPPER')
@@ -220,6 +235,7 @@ class VIEW3D_PT_normal_flood_brush_shortcuts(bpy.types.Panel):
         col.label(text="F (or R) + Move: Resize radius", icon='ARROW_LEFTRIGHT')
         col.label(text="MMB / Shift+MMB: Orbit / Pan viewport", icon='VIEW_PAN')
         col.label(text="Scroll Wheel or [ / ]: Angle limit", icon='MOUSE_MMB_SCROLL')
+        col.label(text="Ctrl+Scroll or Ctrl+[ / ]: Expand/Contract", icon='DRIVER_DISTANCE')
         col.label(text="P: Toggle Preserve Existing", icon='LOCKED')
         col.label(text="I: Toggle Inverse Flood (in radius)", icon='ARROW_LEFTRIGHT')
         col.label(text="U: Fill all remaining unpainted gaps", icon='SHADING_BBOX')

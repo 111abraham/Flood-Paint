@@ -32,6 +32,15 @@ def register_keymaps():
         )
         _addon_keymaps.append((km, kmi))
 
+    # Weight Paint mode: X key toggles weight between 1.0 and 0.0 in vanilla Blender
+    km_wp = kc.keymaps.new(name="Weight Paint", space_type='EMPTY', region_type='WINDOW')
+    kmi_x = km_wp.keymap_items.new(
+        "view3d.flood_weight_toggle",
+        type='X',
+        value='PRESS',
+    )
+    _addon_keymaps.append((km_wp, kmi_x))
+
 
 def unregister_keymaps():
     for km, kmi in _addon_keymaps:
@@ -82,9 +91,10 @@ class NormalFloodBrushPreferences(bpy.types.AddonPreferences):
                 continue
             found = False
             for kmi in km.keymap_items:
-                if kmi.idname == "view3d.normal_flood_brush":
+                if kmi.idname in {"view3d.normal_flood_brush", "view3d.flood_weight_toggle"}:
                     box = col.box()
-                    box.label(text=f"{km_name} Mode:")
+                    action_name = "Start Flood Brush" if kmi.idname == "view3d.normal_flood_brush" else "Toggle Weight (1/0)"
+                    box.label(text=f"{km_name} — {action_name}:")
                     rna_keymap_ui.draw_kmi([], kc, km, kmi, box, 0)
                     found = True
             if not found:
