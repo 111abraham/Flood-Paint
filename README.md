@@ -1,19 +1,34 @@
 # Normal-Aware Flood Brush (Blender 5.2 Add-on)
 
-An interactive, vectorized NumPy flood-fill painting tool for **Blender 5.2**, built for coloring-book style segmentation on high-density meshes (**1,000,000+ triangles**) targeting color 3D printing (`.PLY`, `.OBJ`, `.3MF`), **Texture Paint** UV images, and **Sculpt Face Sets**.
+[![Download Latest Addon (.zip)](https://img.shields.io/badge/Download%20Latest%20Addon-.zip-brightgreen?style=for-the-badge&logo=blender)](https://github.com/111abraham/Flood-Paint/raw/main/normal_aware_flood_brush.zip)
+
+> **Direct Download Link:**  
+> 👉 **[Download normal_aware_flood_brush.zip](https://github.com/111abraham/Flood-Paint/raw/main/normal_aware_flood_brush.zip)** *(Always downloads the latest updated version)*
+
+An interactive, vectorized NumPy flood-fill painting tool for **Blender 5.2**, built for coloring-book style segmentation on high-density meshes (**1,000,000+ triangles**) targeting color 3D printing (`.PLY`, `.OBJ`, `.3MF`), **Texture Paint** UV images, **Weight Paint** vertex groups, and **Sculpt Face Sets**.
 
 ## Features
 
 - **Zero-Lag 1M+ Face Architecture:** Pre-caches CSR face adjacency, dihedral angles, face centers/normals, and `BVHTree` in vectorized NumPy when invoked (reusing verified pure-NumPy topology/UV caches on subsequent `W` invocations for fast re-entry). Wavefront Dijkstra flood propagation runs in ~10–17 ms on 1.31M-triangle meshes, and Texture Paint strokes invalidate GPU image textures (`gl_free()`) for live 3D viewport updates while dragging.
 - **Normal-Change Resistance:** Prevents colors from bleeding across clothing seams, folds, and sharp creases using a configurable `Normal Angle Threshold` (default `30°`) and `Crease Resistance` falloff slider.
 - **Interactive Modal Brush (`view3d.normal_flood_brush`):**
-  - Default shortcut: bare **`W`** in **Sculpt Mode**, **Vertex Paint Mode**, and **Texture Paint Mode** (also launchable from **Object Mode** via the N-Panel).
+  - Default shortcut: bare **`W`** in **Sculpt Mode**, **Vertex Paint Mode**, **Texture Paint Mode**, and **Weight Paint Mode** (also launchable from **Object Mode** via the N-Panel).
   - Live hover preview showing the exact flood region, boundary outline, and 3D surface brush ring via GPU overlays.
   - Real-time `blf` HUD readout for Angle Threshold, Fill Radius, Crease Resistance, and Preserve mode.
   - Compact delta-slice stroke undo stack (`Ctrl+Z` / `Backspace`) inside the modal session plus full Blender Undo (`Ctrl+Z`) on confirm.
+- **Expand / Contract Boundary (`Ctrl + Scroll` or `Ctrl + [` / `Ctrl + ]`):**
+  - Dynamically dilates or erodes the flood boundary in face-ring steps (`-50` to `+50`) via `Ctrl + Wheel Up` / `Ctrl + Wheel Down` or the N-Panel slider.
+- **Color to Vertex Group (Coloring Book Conversion):**
+  - Converts any painted swatch or palette color directly into a dedicated Vertex Group with weight 1.0.
+  - **4 Matching Modes:**
+    - **Exact Swatch (Coloring Book) — *Default*:** Strict match with numerical epsilon $\le 0.015$, eliminating tolerance fiddling. Prevents bleeding between colors with identical hue but different saturation/value (e.g. skin tone vs skin shadow).
+    - **Nearest Palette Swatch (Voronoi):** Mathematically partitions mesh vertices among all active palette swatches with zero overlap.
+    - **Perceptual HSV:** Evaluates distance in cylindrical HSV space, cleanly decoupling Hue from Saturation and Value.
+    - **RGB Distance:** Classic Euclidean distance with adjustable tolerance slider.
 - **Sculpt, Vertex Paint, Texture Paint, & Weight Paint Support:**
   - Bidirectional sync with Blender's active Sculpt / Vertex Paint / Texture Paint brush color (`UnifiedPaintSettings` & `Brush`).
-  - **Weight Paint Mode (`PAINT_WEIGHT`):** Normal-aware expanding selection on mesh vertices with configurable target weight value (0.0 to 1.0). Includes a **New Group per Session** toggle switch (ON by default) which automatically allocates a clean separate vertex group for every painting session until `Esc` is pressed. If cancelled via `Esc`, the session vertex group is cleanly deleted; if confirmed via `RMB`/`Enter`/`Space`, the vertex group is saved with all painted weights.
+  - **Weight Paint Mode (`PAINT_WEIGHT`):** Normal-aware expanding selection on mesh vertices with configurable target weight value (0.0 to 1.0). Includes a **New Group per Session** toggle switch (ON by default) which automatically allocates a clean separate vertex group for every painting session until `Esc` is pressed.
+  - **Weight Flip Hotkey (`X`):** Pressing `X` in Weight Paint mode instantly toggles weight between `1.0` and `0.0` both inside the modal `W` tool and in vanilla Blender.
   - **Sculpt / Vertex Paint / Object Modes:** Writes to **Color Attributes** (`FLOAT_COLOR` / `BYTE_COLOR`, `CORNER` / `POINT`), **Sculpt Face Sets** (`.sculpt_face_set`), or **Both** simultaneously.
   - **Texture Paint Mode:** Rasterizes flooded 3D triangles onto the active UV Image Texture (`UV Image Texture` mode with `seam_bleed` UV margin dilation and multi-material boundary isolation, or optional fallback to `Color Attribute`), plus a one-click **Create Paint Texture** button when starting on an untextured mesh.
   - **Smooth Tool (`S`):** Toggles boundary smoothing for the cursor preview and flood borders. Features a 100% boundary-preserving Laplacian smoother that never clips boundaries or drops segments along symmetry seams, saddle points, or character meshes, while keeping texture painting completely freeze-free and responsive.
