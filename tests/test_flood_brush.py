@@ -19,6 +19,7 @@ import normal_aware_flood_brush
 from normal_aware_flood_brush.flood_engine import (
     compute_flood_faces,
     find_unpainted_faces,
+    offset_flood_boundary_faces,
     smooth_jagged_borders,
     smooth_jagged_texture_borders,
     smooth_local_texture_paint,
@@ -1555,6 +1556,84 @@ class TestNormalAwareFloodBrush(unittest.TestCase):
         self.assertTrue(np.allclose(written_px[:, :3], exp_rgb, atol=0.01))
         # Zero variance: completely uniform solid hard brush fill
         self.assertTrue(np.allclose(written_px[:, :3], written_px[0, :3], atol=1e-3))
+
+    def test_22_expand_contract_boundary_and_zero_neighbor_bleed(self):
+        """Verify Expand/Contract boundary offset and zero bleeding onto neighboring mesh faces."""
+        bpy.ops.mesh.primitive_grid_add(x_subdivisions=20, y_subdivisions=20, size=2.0)
+        obj = bpy.context.active_object
+        dg = bpy.context.evaluated_depsgraph_get()
+        cache = MeshFloodCache(
+            obj=obj,
+            depsgraph=dg,
+            target_output='COLOR',
+            default_domain='CORNER',
+            default_type='FLOAT_COLOR',
+        )
+
+        centers = cache.face_centers
+        base_faces = np.flatnonzero(np.linalg.norm(centers, axis=1) < 0.5).astype(np.int32)
+        self.assertGreater(base_faces.size, 0)
+
+        # 1. Expand boundary (+1, +2)
+        exp_1 = offset_flood_boundary_faces(cache, base_faces, 1)
+        exp_2 = offset_flood_boundary_faces(cache, base_faces, 2)
+        self.assertGreater(len(exp_1), len(base_faces))
+        self.assertGreater(len(exp_2), len(exp_1))
+        self.assertTrue(np.all(np.isin(base_faces, exp_1)))
+
+        # 2. Contract boundary (-1, -2)
+        cnt_1 = offset_flood_boundary_faces(cache, base_faces, -1)
+        cnt_2 = offset_flood_boundary_faces(cache, base_faces, -2)
+        self.assertLess(len(cnt_1), len(base_faces))
+        self.assertLess(len(cnt_2), len(cnt_1))
+        self.assertTrue(np.all(np.isin(cnt_1, base_faces)))
+
+        # 3. Offset = 0 returns identical
+        same = offset_flood_boundary_faces(cache, base_faces, 0)
+        self.assertEqual(len(same), len(base_faces))
+        self.assertTrue(np.array_equal(same, base_faces))
+
+        # 4. In compute_flood_faces: boundary_offset expands and contracts wavefront results
+        hit = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+        seed = int(base_faces[0])
+        res_0 = compute_flood_faces(
+            cache, seed, hit, radius=0.6, angle_deg=45.0, crease_resistance=0.95,
+            preserve_existing=False, boundary_offset=0
+        )
+        res_p1 = compute_flood_faces(
+            cache, seed, hit, radius=0.6, angle_deg=45.0, crease_resistance=0.95,
+            preserve_existing=False, boundary_offset=1
+        )
+        res_m1 = compute_flood_faces(
+            cache, seed, hit, radius=0.6, angle_deg=45.0, crease_resistance=0.95,
+            preserve_existing=False, boundary_offset=-1
+        )
+        self.assertGreater(len(res_p1), len(res_0))
+        self.assertLess(len(res_m1), len(res_0))
+
+        # 5. Texture paint: zero bleed onto neighboring unselected faces
+        img = bpy.data.images.new("NoBleedTestImg", width=128, height=128, alpha=True)
+        img.pixels.foreach_set([0.0] * (128 * 128 * 4))
+        uv_layer = obj.data.uv_layers.new(name="UVMap2")
+        bpy.context.view_layer.update()
+        depsgraph = bpy.context.evaluated_depsgraph_get()
+        t_cache = MeshFloodCache(
+            obj=obj,
+            depsgraph=depsgraph,
+            target_output='TEXTURE',
+            default_domain='CORNER',
+            default_type='FLOAT_COLOR',
+            tex_image=img,
+            uv_layer=uv_layer,
+        )
+        fill_col = (1.0, 0.5, 0.0, 1.0)
+        flat_idx, _ = t_cache.apply_texture_faces(base_faces, fill_col, commit=True, smooth_boundary=True)
+
+        neighbor_faces = offset_flood_boundary_faces(cache, base_faces, 1)
+        only_neighbor_faces = np.setdiff1d(neighbor_faces, base_faces)
+        neighbor_idx, _ = t_cache.apply_texture_faces(only_neighbor_faces, (0.0, 1.0, 0.0, 1.0), commit=False, smooth_boundary=False)
+        overlap = np.intersect1d(flat_idx, neighbor_idx)
+        self.assertEqual(len(overlap), 0, "Paint must not bleed onto neighboring mesh faces!")
 
 
 if __name__ == "__main__":

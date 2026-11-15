@@ -41,6 +41,7 @@ class FloodOverlayState:
         self.preserve_existing = False
         self.invert_flood = False
         self.smooth_tool = False
+        self.boundary_offset = 0
         self.target_label = "Color Attribute"
         self.palette_colors: list[tuple[float, float, float]] = []
         self.palette_active_idx: int = -1
@@ -242,8 +243,9 @@ def draw_callback_pixel(overlay: FloodOverlayState, context):
     preserve_str = "ON" if overlay.preserve_existing else "OFF"
     mode_suffix = "   |   INVERSE (GAP-FILL) [I]" if overlay.invert_flood else ""
     smooth_suffix = "   |   SMOOTH [S]" if overlay.smooth_tool else ""
+    offset_suffix = f"   |   OFFSET [{overlay.boundary_offset:+d}]" if overlay.boundary_offset != 0 else ""
     resist_pct = int(round(overlay.crease_resistance * 100.0))
-    line_title = f"Normal-Aware Flood Brush   |   Target: {overlay.target_label}{mode_suffix}{smooth_suffix}"
+    line_title = f"Normal-Aware Flood Brush   |   Target: {overlay.target_label}{mode_suffix}{smooth_suffix}{offset_suffix}"
     line_params = (
         f"Angle: {overlay.angle_deg:.1f}°   |   "
         f"Radius: {overlay.radius:.3f} m   |   "

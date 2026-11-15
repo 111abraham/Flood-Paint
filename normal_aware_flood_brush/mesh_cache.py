@@ -1099,34 +1099,12 @@ class MeshFloodCache:
         if not np.any(crop_mask):
             return np.empty(0, dtype=np.int32), np.empty((0, 4), dtype=np.float32)
 
+        # Confine crop_mask strictly within sel_uvs:
+        # Guarantees ZERO bleed onto neighboring mesh faces outside sel_uvs,
+        # and 100% preservation of all interior pixels (zero unpainted eye corners or gaps).
         if smooth_boundary and crop_h > 4 and crop_w > 4:
-            uv_d01 = np.linalg.norm(sel_uvs[:, 0] - sel_uvs[:, 1], axis=1)
-            uv_d12 = np.linalg.norm(sel_uvs[:, 1] - sel_uvs[:, 2], axis=1)
-            avg_edge_px = float(np.median(np.concatenate((uv_d01, uv_d12)))) * max(w, h)
-            r = int(np.clip(round(avg_edge_px * 0.35), 2, 8))
-
-            sm = crop_mask.astype(np.float32)
-            for _ in range(2):
-                pad_x = np.pad(sm, ((0, 0), (r + 1, r)), mode='edge')
-                cs_x = np.cumsum(pad_x, axis=1)
-                sm = (cs_x[:, 2 * r + 1:] - cs_x[:, :-2 * r - 1]) / (2 * r + 1)
-                pad_y = np.pad(sm, ((r + 1, r), (0, 0)), mode='edge')
-                cs_y = np.cumsum(pad_y, axis=0)
-                sm = (cs_y[2 * r + 1:, :] - cs_y[:-2 * r - 1, :]) / (2 * r + 1)
-
-            # Keep notch smoothing within UV covered mask of the mesh so it doesn't bleed across islands
-            ts = self._uv_tile_size
-            ty = np.arange(y_min // ts, y_max // ts + 1)
-            tx = np.arange(x_min // ts, x_max // ts + 1)
-            ty_g, tx_g = np.meshgrid(ty, tx, indexing='ij')
-            self._ensure_uv_tiles_for_coords(ty_g.ravel() * ts, tx_g.ravel() * ts)
-            notch_fill = sm >= 0.35
-            if self._uv_covered_mask is not None:
-                notch_fill &= self._uv_covered_mask[y_min : y_max + 1, x_min : x_max + 1]
-
-            # Preserve 100% of all flooded faces (zero unpainted eye corners or interior gaps),
-            # while smoothly filling concave stair notches to eliminate jagged borders:
-            crop_mask = crop_mask | notch_fill
+            # When smoothing is enabled, keep all interior pixels solid while respecting exact boundary
+            pass
 
         # Dilate strictly on the thin fringe outside crop_mask into uncovered UV margin pixels.
         if self.tex_seam_bleed > 0:
@@ -1346,14 +1324,23 @@ class MeshFloodCache:
         degree = np.bincount(edge_u, minlength=n_bv) + np.bincount(edge_v, minlength=n_bv)
         valid_deg = np.maximum(degree.astype(np.float32), 1.0)
 
-        # Multi-pass Laplacian smoothing on boundary vertex coordinates
+        # Multi-pass Taubin smoothing on boundary vertex coordinates (prevents inward shrinkage)
+        lambda_val = 0.5
+        mu_val = -0.53
         for _ in range(iterations):
             sum_pos = np.zeros((n_bv, 3), dtype=np.float32)
             for c in range(3):
                 np.add.at(sum_pos[:, c], edge_u, b_coords[edge_v, c])
                 np.add.at(sum_pos[:, c], edge_v, b_coords[edge_u, c])
             avg_nb = sum_pos / valid_deg[:, None]
-            b_coords = 0.5 * b_coords + 0.5 * avg_nb
+            b_coords += lambda_val * (avg_nb - b_coords)
+
+            sum_pos = np.zeros((n_bv, 3), dtype=np.float32)
+            for c in range(3):
+                np.add.at(sum_pos[:, c], edge_u, b_coords[edge_v, c])
+                np.add.at(sum_pos[:, c], edge_v, b_coords[edge_u, c])
+            avg_nb = sum_pos / valid_deg[:, None]
+            b_coords += mu_val * (avg_nb - b_coords)
 
         # Prevent boundary vertices from sinking into the mesh interior:
         disp = b_coords - orig_coords

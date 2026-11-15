@@ -275,6 +275,13 @@ class NormalFloodBrushProperties(bpy.types.PropertyGroup):
         description="Smooth the jagged stair-stepped boundary edges of the flood cursor preview and paint strokes (Hotkey: S)",
         default=False,
     )
+    boundary_offset: IntProperty(
+        name="Expand / Contract",
+        description="Expand (positive) or contract (negative) the flood boundary by polygon rings (default: 0; Hotkeys: [ / ])",
+        default=0,
+        min=-50,
+        max=50,
+    )
     weight_auto_vertex_group: BoolProperty(
         name="New Group per Session",
         description="Automatically create a separate vertex group for every weight painting session until Esc is pressed",

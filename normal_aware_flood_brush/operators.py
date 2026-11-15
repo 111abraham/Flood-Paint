@@ -268,6 +268,7 @@ class VIEW3D_OT_normal_flood_brush(bpy.types.Operator):
         ov.preserve_existing = props.preserve_existing
         ov.invert_flood = props.invert_flood
         ov.smooth_tool = props.smooth_tool
+        ov.boundary_offset = props.boundary_offset
         ov.target_label = _target_label(self._target_mode)
         ov.is_painting = self._is_painting
         ov.is_resizing = self._is_resizing
@@ -544,6 +545,7 @@ class VIEW3D_OT_normal_flood_brush(bpy.types.Operator):
             anchor_fs=anchor_fs,
             invert_flood=props.invert_flood,
             smooth_tool=props.smooth_tool,
+            boundary_offset=props.boundary_offset,
         )
         flood_ms = (time.perf_counter() - t0) * 1000.0
         self._overlay.last_flood_ms = flood_ms
@@ -576,6 +578,7 @@ class VIEW3D_OT_normal_flood_brush(bpy.types.Operator):
                     face_stroke_ids=self._face_stroke_ids,
                     invert_flood=False,
                     smooth_tool=props.smooth_tool,
+                    boundary_offset=props.boundary_offset,
                 )
             else:
                 preview_faces = filled_faces
@@ -958,6 +961,19 @@ class VIEW3D_OT_normal_flood_brush(bpy.types.Operator):
                 self._overlay.set_toast(f"Smooth Tool: {state_str}", duration=1.4)
                 self._refresh_at_last_hit(context)
                 self._redraw_viewport(context)
+            return {'RUNNING_MODAL'}
+
+        # Boundary Expand / Contract hotkeys ([ to contract, ] to expand)
+        if event.type in {'LEFT_BRACKET', 'RIGHT_BRACKET'} and not event.ctrl and not event.alt and event.value == 'PRESS':
+            if event.type == 'LEFT_BRACKET':
+                props.boundary_offset = max(-50, props.boundary_offset - 1)
+            else:
+                props.boundary_offset = min(50, props.boundary_offset + 1)
+            state_str = f"{props.boundary_offset:+d}" if props.boundary_offset != 0 else "0"
+            self._overlay.set_toast(f"Boundary Offset: {state_str}", duration=1.2)
+            self._sync_overlay_props(context)
+            self._refresh_at_last_hit(context)
+            self._redraw_viewport(context)
             return {'RUNNING_MODAL'}
 
         # Cycle active palette color (C).

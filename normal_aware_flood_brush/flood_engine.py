@@ -305,6 +305,7 @@ def compute_flood_faces(
     color_tol: float = 0.025,
     invert_flood: bool = False,
     smooth_tool: bool = False,
+    boundary_offset: int = 0,
 ) -> np.ndarray:
     """Propagate a normal-aware localized wavefront from seed_face within radius.
 
@@ -315,6 +316,7 @@ def compute_flood_faces(
     inverts the normal-aware wavefront across sharp angle creases inside the brush radius.
 
     When ``smooth_tool=True``, boundary stair-stepping and jagged corners are smoothed.
+    When ``boundary_offset != 0``, the boundary is expanded (> 0) or contracted (< 0) by face rings.
     """
     if not invert_flood:
         res = _run_wavefront_flood(
@@ -332,6 +334,8 @@ def compute_flood_faces(
             anchor_fs=anchor_fs,
             color_tol=color_tol,
         )
+        if boundary_offset != 0 and res.size > 0:
+            res = offset_flood_boundary_faces(cache, res, boundary_offset)
         return res
 
     # Inverse + implicit Gap-Fill mode: gather all connected faces inside Euclidean brush radius.
@@ -374,7 +378,10 @@ def compute_flood_faces(
     # If painted boundaries exist inside cursor, invert the painted boundary selection:
     # protect all painted walls and select all trapped/unpainted middle faces inside cursor.
     if np.any(painted):
-        return sphere_faces[~painted]
+        res = sphere_faces[~painted]
+        if boundary_offset != 0 and res.size > 0:
+            res = offset_flood_boundary_faces(cache, res, boundary_offset)
+        return res
 
     # Blank/unpainted region fallback: invert the normal-angle flood across creases inside radius.
     normal_faces = _run_wavefront_flood(
@@ -391,7 +398,63 @@ def compute_flood_faces(
     in_mask[normal_faces] = True
     rev_faces = sphere_faces[~in_mask[sphere_faces]]
     in_mask[normal_faces] = False
+    if boundary_offset != 0 and rev_faces.size > 0:
+        rev_faces = offset_flood_boundary_faces(cache, rev_faces, boundary_offset)
     return rev_faces
+
+
+def offset_flood_boundary_faces(
+    cache: MeshFloodCache,
+    faces: np.ndarray,
+    offset: int,
+) -> np.ndarray:
+    """Expand (offset > 0) or contract (offset < 0) the flood face selection by |offset| polygon rings."""
+    if faces.size == 0 or offset == 0 or cache.adj_offsets is None or cache.adj_neighbors is None:
+        return faces
+
+    adj_offsets = cache.adj_offsets
+    adj_neighbors = cache.adj_neighbors
+    num_faces = cache.num_faces
+
+    in_mask = np.zeros(num_faces, dtype=bool)
+    in_mask[faces] = True
+
+    if offset > 0:
+        for _ in range(offset):
+            sel_faces = np.flatnonzero(in_mask).astype(np.int32)
+            if sel_faces.size == 0:
+                break
+            starts = adj_offsets[sel_faces]
+            ends = adj_offsets[sel_faces + 1]
+            counts = ends - starts
+            total = int(counts.sum())
+            if total == 0:
+                break
+            cum = np.cumsum(counts)
+            edge_idx = np.arange(total, dtype=np.int32) + np.repeat(starts - (cum - counts), counts)
+            nbs = adj_neighbors[edge_idx]
+            valid_nbs = nbs[~cache.hidden_faces[nbs]]
+            in_mask[valid_nbs] = True
+    else:
+        for _ in range(abs(offset)):
+            sel_faces = np.flatnonzero(in_mask).astype(np.int32)
+            if sel_faces.size == 0:
+                break
+            starts = adj_offsets[sel_faces]
+            ends = adj_offsets[sel_faces + 1]
+            counts = ends - starts
+            total = int(counts.sum())
+            if total == 0:
+                break
+            cum = np.cumsum(counts)
+            face_idx = np.repeat(sel_faces, counts)
+            edge_idx = np.arange(total, dtype=np.int32) + np.repeat(starts - (cum - counts), counts)
+            nbs = adj_neighbors[edge_idx]
+            nb_sel = np.bincount(face_idx, weights=in_mask[nbs], minlength=num_faces)
+            boundary_faces = sel_faces[nb_sel[sel_faces] < counts]
+            in_mask[boundary_faces] = False
+
+    return np.flatnonzero(in_mask).astype(np.int32)
 
 
 def smooth_flood_boundary_faces(

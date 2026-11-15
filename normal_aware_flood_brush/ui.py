@@ -117,6 +117,9 @@ class VIEW3D_PT_normal_flood_brush(bpy.types.Panel):
             icon='SHADING_BBOX',
         )
 
+        offset_row = flood_box.row(align=True)
+        offset_row.prop(props, "boundary_offset", text="Expand / Contract")
+
         # Target Output & Attribute / Texture settings.
         out_box = layout.box()
         target_mode = get_effective_target_mode(context)
